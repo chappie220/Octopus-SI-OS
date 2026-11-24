@@ -18,8 +18,10 @@ function createClientAccessController(options = {}) {
   if (!path.isAbsolute(configuredLabCredentialPath)) throw new Error("Client test credential path must be absolute");
   const labCredentialPath = path.resolve(configuredLabCredentialPath);
   if (credentialPath === labCredentialPath) throw new Error("Administrator and Test credential paths must be different");
+  const administratorUsername = options.administratorUsername;
   const environmentAdministratorSecret = String(options.administratorSecret ?? process.env.OCTOPUS_CLIENT_ADMIN_SECRET ?? "");
   const environmentLabSecret = String(options.labSecret ?? process.env.OCTOPUS_CLIENT_LAB_SECRET ?? "");
+  const labEnabled = options.labEnabled !== false;
   const defaultLabSecret = String(options.defaultLabSecret ?? DEFAULT_LAB_SECRET);
   const now = typeof options.now === "function" ? options.now : Date.now;
   const openAccess = String(options.openAccess ?? process.env.OCTOPUS_CLIENT_ACCESS_OPEN ?? "") === "1";
@@ -33,7 +35,7 @@ function createClientAccessController(options = {}) {
     throw new Error(`OCTOPUS_CLIENT_LAB_SECRET must contain at least ${MIN_LAB_SECRET_LENGTH} characters`);
   }
   if (defaultLabSecret.length < MIN_LAB_SECRET_LENGTH) throw new Error("Default client test password is invalid");
-  if (environmentAdministratorSecret && verifyLabSecret(environmentAdministratorSecret)) {
+  if (labEnabled && environmentAdministratorSecret && verifyLabSecret(environmentAdministratorSecret)) {
     throw new Error("Administrator and Test passwords must be different.");
   }
 
@@ -42,7 +44,7 @@ function createClientAccessController(options = {}) {
     const configured = Boolean(environmentAdministratorSecret || fs.existsSync(credentialPath));
     return {
       configured,
-      labAvailable: configured,
+      labAvailable: configured && labEnabled,
       authenticated: Boolean(session),
       profile: session?.profile ?? null,
       expiresAt: session ? new Date(session.expiresAt).toISOString() : null,
@@ -66,7 +68,7 @@ function createClientAccessController(options = {}) {
     return createSession("live");
   }
 
-  function unlock(candidate) {
+  function unlock(candidate, username) {
     const blockedFor = unlockBlockedUntil - now();
     if (blockedFor > 0) {
       throw new Error(`Too many unsuccessful unlock attempts. Try again in ${Math.max(1, Math.ceil(blockedFor / 1000))} seconds.`);
@@ -74,11 +76,13 @@ function createClientAccessController(options = {}) {
     const value = String(candidate ?? "");
     const record = environmentAdministratorSecret ? null : readCredential();
     if (!environmentAdministratorSecret && !record) throw new Error("Configure the Administrator password before unlocking Octopus.");
-    if (verifyAdministratorSecret(value, record)) {
+    const usernameMatches = administratorUsername === undefined
+      || secretEqual(typeof username === "string" ? username.trim() : "", administratorUsername);
+    if (verifyAdministratorSecret(value, record) && usernameMatches) {
       resetUnlockFailures();
       return createSession("live");
     }
-    if (verifyLabSecret(value)) {
+    if (labEnabled && verifyLabSecret(value)) {
       resetUnlockFailures();
       return createSession("lab");
     }
@@ -87,7 +91,7 @@ function createClientAccessController(options = {}) {
       const exponent = Math.min(8, failedUnlocks - UNLOCK_FAILURES_BEFORE_DELAY);
       unlockBlockedUntil = now() + Math.min(5 * 60 * 1000, 2_000 * (2 ** exponent));
     }
-    throw new Error("Incorrect password.");
+    throw new Error(administratorUsername === undefined ? "Incorrect password." : "Incorrect username or password.");
   }
 
   function resetUnlockFailures() {
@@ -131,8 +135,8 @@ function createClientAccessController(options = {}) {
         updatedAt: typeof record?.updatedAt === "string" ? record.updatedAt : null,
       },
       test: {
-        available: Boolean(environmentAdministratorSecret || record),
-        source: live
+        available: labEnabled && Boolean(environmentAdministratorSecret || record),
+        source: live && labEnabled
           ? environmentLabSecret ? "environment" : fs.existsSync(labCredentialPath) ? "administrator" : "default"
           : null,
       },
@@ -204,6 +208,9 @@ function createClientAccessController(options = {}) {
   }
 
   function createSession(profile) {
+    for (const [token, session] of sessions) {
+      if (session.expiresAt <= now()) sessions.delete(token);
+    }
     const token = crypto.randomBytes(32).toString("base64url");
     const expiresAt = now() + SESSION_TTL_MS;
     sessions.set(token, { profile, expiresAt });

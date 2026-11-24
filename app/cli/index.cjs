@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { parseArgs } = require("node:util");
 
 const HELP = `Octopus — your agentic operating system, in the terminal
@@ -18,6 +19,7 @@ const HELP = `Octopus — your agentic operating system, in the terminal
   octopus project folders <id> <folder>...  Set a Project's source folders (first is Primary)
   octopus project policies        Show policies available to a parent Project
   octopus project delete <id> --yes  Delete a Project
+  octopus application connect <id> [interface]  Connect an installed Application using its declared environment
   octopus agent create <name>     Create an Agent with an explicit model
   octopus agent delete <id> --yes  Delete an Agent
   octopus models                  Show available permitted models
@@ -31,6 +33,7 @@ const HELP = `Octopus — your agentic operating system, in the terminal
   octopus download <task> <attachment-id> <file>  Save an admitted attachment
   octopus setup                    Set up a new Home interactively
   octopus up                       Start or join the shared runtime
+  octopus serve                    Start the runtime and serve the Agent WebUI
   octopus down                     Stop the running shared runtime cleanly
   octopus restart                  Restart the running shared runtime in place
   octopus status                   Inspect runtime and Home readiness
@@ -55,6 +58,7 @@ Options:
   --answer <json>                 Structured answer to a pending request
   --decision <choice>             Approval choice (accept/decline/cancel)
   --bundle <path>                 Explicit compatible runtime distribution
+  --port <number>                 WebUI port for serve (default 4180)
   -h, --help                      Show this help
 
 Use 'exec -' or 'send <task> -' to read a prompt from stdin.
@@ -67,7 +71,7 @@ function argumentsFor(argv) {
     args: argv, allowPositionals: true, strict: true,
     options: {
       help: { type: "boolean", short: "h" }, version: { type: "boolean", short: "v" },
-      home: { type: "string" }, bundle: { type: "string" },
+      home: { type: "string" }, bundle: { type: "string" }, port: { type: "string" },
       project: { type: "string" }, agent: { type: "string" },
       provider: { type: "string" }, model: { type: "string" }, effort: { type: "string" }, policy: { type: "string" },
       attach: { type: "string", multiple: true, default: [] },
@@ -113,13 +117,67 @@ async function main(argv = process.argv.slice(2), io = process) {
       ...(flags.access === undefined ? {} : { access: taskAccess(flags.access) }),
     };
     const words = [...parsed.positionals];
-    const known = new Set(["chat", "resume", "exec", "send", "watch", "tasks", "history", "inspect", "projects", "models", "answer", "stop", "rename", "archive", "restore", "delete", "export", "setup", "up", "down", "restart", "status", "doctor", "agent", "project", "download"]);
+    const known = new Set(["chat", "resume", "exec", "send", "watch", "tasks", "history", "inspect", "projects", "models", "answer", "stop", "rename", "archive", "restore", "delete", "export", "setup", "up", "serve", "down", "restart", "status", "doctor", "application", "agent", "project", "download"]);
     const command = known.has(words[0]) ? words.shift() : "chat";
     const report = (value) => {
       if (json) io.stdout.write(`${JSON.stringify(value)}\n`);
       else io.stdout.write(`${safeText(presentResult(value))}\n`);
     };
+    if (flags.port !== undefined && command !== "serve") throw new Error("--port is available only for serve.");
+    if (command === "application") {
+      const [action, applicationId, interfaceId = applicationId, ...remaining] = words;
+      if (action !== "connect" || !applicationId || remaining.length) {
+        throw new Error("Use 'application connect <id> [interface]'.");
+      }
+      const controller = new AbortController();
+      signalHandler = () => controller.abort();
+      process.on("SIGINT", signalHandler);
+      const state = await environment.connectApplication({
+        operationId: randomUUID(), applicationId, interfaceId, input: {},
+      }, {
+        signal: controller.signal,
+        openExternal: (url) => progress(io, json, url),
+        onProgress: (update) => progress(io, json, [update.message, update.url].filter(Boolean).join(" ")),
+      });
+      report(state);
+      return state.state === "connected" ? 0 : 1;
+    }
     if (command === "status") { report(await environment.status()); return 0; }
+    if (command === "serve") {
+      if (words.length) throw new Error("serve does not accept positional arguments. See --help.");
+      const { createAgentServer } = require("../electron/agentServer.cjs");
+      const server = await createAgentServer({
+        environment,
+        port: flags.port === undefined ? undefined : Number(flags.port),
+        publicOrigin: process.env.OCTOPUS_AGENT_PUBLIC_ORIGIN,
+      });
+      if (require.main === module) {
+        delete process.env.OCTOPUS_TURNSTILE_SECRET_KEY;
+        delete process.env.OCTOPUS_CLIENT_ADMIN_SECRET;
+      }
+      const stop = new AbortController();
+      const onSignal = () => stop.abort();
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
+      try {
+        environment.requireDistribution();
+        await server.listen();
+        await environment.start({
+          signal: stop.signal,
+          timeoutMs: parsed.timeoutMs || undefined,
+          onProgress: (value) => progress(io, json, value.phase.replaceAll("_", " ")),
+        });
+        report({ url: server.origin, home: environment.home });
+        if (!stop.signal.aborted) await new Promise((resolve) => stop.signal.addEventListener("abort", resolve, { once: true }));
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      } finally {
+        process.off("SIGINT", onSignal);
+        process.off("SIGTERM", onSignal);
+        await server.close();
+      }
+      return 0;
+    }
     if (command === "up") {
       report(await environment.start({ timeoutMs: parsed.timeoutMs > 0 ? parsed.timeoutMs : undefined,
         onProgress: (value) => progress(io, json, value.phase.replaceAll("_", " ")) }));

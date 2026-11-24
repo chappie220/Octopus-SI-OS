@@ -93,6 +93,7 @@ function resolveEnvironment(options = {}) {
   const childEnv = { ...merged, ...launchEnv, CODEX_HOME: codexHome };
   delete childEnv.OCTOPUS_CLIENT_ADMIN_SECRET;
   delete childEnv.OCTOPUS_CLIENT_LAB_SECRET;
+  delete childEnv.OCTOPUS_TURNSTILE_SECRET_KEY;
   delete childEnv.OCTOPUS_APP_LISTEN;
   if (options.endpoint || merged.OCTOPUS_APP_LISTEN) childEnv.OCTOPUS_APP_LISTEN = endpoint;
   privateEnvironments.set(result, { childEnv, configuredEndpoint: Boolean(options.endpoint || merged.OCTOPUS_APP_LISTEN) });
@@ -113,6 +114,27 @@ function createEnvironment(options = {}) {
     async doctor(request = {}) { return runRuntimeCommand(environment, "doctor", request); },
     requireDistribution() { return requireDistribution(environment); },
     async setup(request = {}) { return require("./setup.cjs").setupEnvironment(environment, request); },
+    async connectApplication(request, options = {}) {
+      const { createApplicationConnectionHost, createRegistryConnectionTargets } = require("../electron/applicationConnection.cjs");
+      const host = createApplicationConnectionHost({
+        resolveTargets: createRegistryConnectionTargets({
+          registryRoot: () => environment.packageRoots.activeRegistryRoot,
+          octopusHome: () => environment.home,
+          launchEnvironment: () => privateEnvironments.get(environment).childEnv,
+          openExternal: options.openExternal,
+        }),
+        scope: () => environment.home,
+      });
+      const cancel = () => host.cancel({ operationId: request.operationId });
+      assertNotAborted(options.signal);
+      options.signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        return await host.connect(request, options);
+      } finally {
+        options.signal?.removeEventListener("abort", cancel);
+        host.dispose();
+      }
+    },
     accountClient(request = {}) {
       if (request.openExternal !== undefined) {
         if (typeof request.openExternal !== "function") throw new Error("Sign-in address handler must be a function.");
@@ -145,6 +167,7 @@ async function status(environment, options = {}, currentProjection) {
   const observed = await host.probe();
   const result = {
     phase: observed.phase, runtimeReady: observed.ready, clientReady: false, ready: false,
+    workspaceConfigured: false,
     pid: observed.pid, ownership: observed.ownership, home: environment.home,
     endpoint: environment.endpoint, logPath: environment.logPath,
     storageHealth: observed.storageHealth,
@@ -172,6 +195,7 @@ async function status(environment, options = {}, currentProjection) {
     } finally { if (!currentProjection) store.close(); }
   }
   if (typeof interfaceId !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(interfaceId)) throw new Error("Home endpoint requires an exact interface id.");
+  result.workspaceConfigured = true;
   result.endpoint = privateEnvironments.get(environment)?.configuredEndpoint
     ? environment.endpoint : normalizedEndpoint("", environment.home, interfaceId);
   requireSocketLength(result.endpoint.slice(7));
@@ -381,8 +405,9 @@ function runtimeHost(environment) {
   });
 }
 
-function projectionStore(environment) {
+function projectionStore(environment, { onChange } = {}) {
   return createProjectionStore({
+    onChange,
     resolveRepoRoot: () => environment.repoRoot, sourceRegistry: () => environment.sourceRegistry,
     localPackageRegistry: () => environment.packageRoots.sourceRegistryRoot,
     localPackageLibrary: () => environment.packageRoots.libraryRoot,

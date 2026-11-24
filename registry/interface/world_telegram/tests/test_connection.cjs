@@ -134,7 +134,7 @@ test("probe reaches the Bot API like the interface and reports missing, rejected
   assert.deepEqual(proxy.tunnels, [api.authority]);
   const split = await connection.probe(context(api, { values: { TELEGRAM_BOT_TOKEN: TOKEN }, launch: { TELEGRAM_BOT_TOKEN: `555:${"B".repeat(35)}` } }).ctx);
   assert.equal(split.state, "error");
-  assert.match(split.message, /^TELEGRAM_BOT_TOKEN is set in this Mac's environment and saved in Octopus with a different value/);
+  assert.match(split.message, /^TELEGRAM_BOT_TOKEN is set in the host environment and saved in Octopus with a different value/);
   assert.equal(api.calls.length, 2);
 });
 
@@ -174,7 +174,7 @@ test("the environment is checked before Telegram is called, and pairing leaves t
   let session;
   const api = await telegram({ getMe: BOT, getWebhookInfo: { url: "" }, getUpdates: () => [{ update_id: 70, ...start(session.progress) }], sendMessage: { message_id: 4 } });
   const split = await connection.connect(context(api, { input: { TELEGRAM_BOT_TOKEN: TOKEN }, launch: { TELEGRAM_BOT_TOKEN: `555:${"B".repeat(35)}` } }).ctx);
-  assert.match(split.message, /^TELEGRAM_BOT_TOKEN is set in this Mac's environment to a different value/);
+  assert.match(split.message, /^TELEGRAM_BOT_TOKEN is set in the host environment to a different value/);
   const reserved = await connection.probe(context(api, { values: { TELEGRAM_BOT_TOKEN: TOKEN }, launch: { OCTOPUS_TELEGRAM_FALLBACK_IPS: "100.64.0.1, 203.0.113.5" } }).ctx);
   assert.deepEqual(reserved, { state: "error", message: "OCTOPUS_TELEGRAM_FALLBACK_IPS must list public IPv4 addresses." });
   assert.equal(api.calls.length, 0);
@@ -208,14 +208,47 @@ test("typed allowed users skip pairing, bad input fails clearly and disconnect s
   const cleared = context(api, { values: { TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_ALLOWED_USERS: "4242" } });
   const gone = await connection.disconnect(cleared.ctx);
   assert.deepEqual([gone.state, gone.manage], ["not_connected", MANAGE]);
-  assert.match(gone.message, /^Telegram is disconnected: Octopus removed the bot token and allowed users from this Mac\./);
+  assert.match(gone.message, /^Telegram is disconnected: Octopus removed the bot token and allowed users from this Home\./);
   assert.deepEqual(cleared.saved, [{ TELEGRAM_BOT_TOKEN: null, TELEGRAM_ALLOWED_USERS: null, TELEGRAM_HOME_CHAT: null }]);
   const ambient = context(api, { values: { TELEGRAM_BOT_TOKEN: TOKEN }, launch: { TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_ALLOWED_USERS: "4242" } });
   const kept = await connection.disconnect(ambient.ctx);
   assert.equal(kept.state, "connected");
-  assert.match(kept.message, /TELEGRAM_BOT_TOKEN is set in this Mac's environment, so the Telegram interface keeps using that bot/);
+  assert.match(kept.message, /TELEGRAM_BOT_TOKEN is set in the host environment, so the Telegram interface keeps using that bot/);
 });
 
 test("the operation catalog declares one precise tool per Telegram action", () => {
   assertOperationCatalog(ROOT, "telegram", 22);
+});
+
+test("headless connection reads the selected Home environment and publishes Telegram task routes", async () => {
+  const api = await telegram({ getMe: BOT });
+  const home = fs.mkdtempSync("/tmp/octo-telegram-");
+  const activeRegistry = path.join(home, "registry");
+  const owner = path.join(activeRegistry, "interface", descriptor.id);
+  fs.mkdirSync(path.dirname(owner), { recursive: true });
+  fs.mkdirSync(path.join(home, "interfaces"), { mode: 0o700 });
+  fs.cpSync(ROOT, owner, { recursive: true });
+  fs.writeFileSync(path.join(home, ".env"), [
+    `TELEGRAM_BOT_TOKEN=${TOKEN}`,
+    `TELEGRAM_ALLOWED_USERS=${ANN.id}`,
+    `OCTOPUS_TELEGRAM_API_BASE=${api.base}`,
+  ].join("\n"), { mode: 0o600 });
+  const { createEnvironment } = require("../../../../app/cli/environment.cjs");
+  const env = createEnvironment({ home, env: {} });
+  try {
+    const state = await env.connectApplication({
+      operationId: "telegram-headless-test", applicationId: descriptor.id,
+      interfaceId: descriptor.id, input: {},
+    });
+    assert.equal(state.state, "connected");
+    assert.ok(api.calls.some((call) => call.method === "getMe" && call.token === TOKEN));
+    const file = path.join(activeRegistry, "artifact", `artifact-operation-catalog-${descriptor.id}`, "artifact.json");
+    const catalog = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.deepEqual(catalog.task_input_labels, ["telegram.event"]);
+    assert.ok(catalog.operations.some((operation) => operation.name === "telegram.send_message"));
+    assert.ok(!JSON.stringify(catalog).includes(TOKEN));
+  } finally {
+    env.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -572,7 +572,7 @@ function createClient(environment, dependencies = {}) {
     await staging.abortOwner(owner);
   }
 
-  return { env, status, contexts, tasks, task, models, history, rawHistory, send, follow, stop, respond, rename, archive,
+  return { env, status, mutate, contexts, tasks, task, models, history, rawHistory, send, follow, stop, respond, rename, archive,
     createAgent, deleteAgent, createProject, deleteProject, setProjectFolders, projectPolicies, deleteTask, search, saveAttachment, close, read, catalogue };
 }
 

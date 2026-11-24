@@ -167,6 +167,13 @@ npm --prefix app run build:cli
 
 See [Terminal client](docs/cli.md) for setup, keyboard controls, existing Home selection, and commands for scripts or other agents.
 
+### Agent server and WebUI
+
+Run `./octopus serve` to keep the runtime on a server and use it from a browser
+or the desktop client's **File → Connect to Agent Server…** menu. Both clients
+share the server's Home and tasks. See the [Agent server guide](docs/agent-server.md)
+for builds, server setup, and remote connections.
+
 ## How it works
 
 Two words carry the picture. **System** is everything Octopus can act on. **World** is everything else. They meet only at declared interfaces; there is no other route.

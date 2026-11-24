@@ -366,9 +366,10 @@ For a browser renderer preview, from the repository root:
 npm --prefix app run dev
 ```
 
-Vite serves the renderer on the local address it prints. Electron-only operations
-and runtime-backed flows require the desktop app; the browser preview cannot
-stand in for their acceptance.
+Vite serves the renderer on the local address it prints. For the production
+browser client and its runtime-backed flows, follow the
+[Agent server guide](agent-server.md). Use the packaged desktop app for
+Electron-only operations.
 
 Test the built `app/build/Octopus.app` with its bundled release runtime and
 capability executables. Use a dedicated test Home and the actual onboarding

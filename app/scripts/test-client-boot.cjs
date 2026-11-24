@@ -185,6 +185,78 @@ test("Client Lab and an access-required probe never show the launch gate, and lo
   assert.equal(shown(".stub-chatgpt-gate"), false);
 });
 
+test("Agent sign-in submits both credentials and a fresh human verification before opening the shared shell", async (t) => {
+  root.render(null);
+  await settle(5);
+  delete window.octopusTransport;
+  const originalFormData = globalThis.FormData;
+  globalThis.FormData = w.FormData;
+  let challenge;
+  let resets = 0;
+  w.turnstile = {
+    render(_container, options) { challenge = options; return "widget-id"; },
+    reset() { resets += 1; },
+    remove() {},
+  };
+  let resolveStatus;
+  const pending = new Promise((resolve) => { resolveStatus = resolve; });
+  const attempts = [];
+  const fetchStatus = t.mock.method(globalThis, "fetch", async (url, request) => {
+    if (url === "/__octopus/runtime-status") return pending;
+    assert.equal(url, "/__octopus/access/unlock");
+    attempts.push(JSON.parse(request.body));
+    if (attempts.length === 1) {
+      return Response.json({ error: "Incorrect username or password." }, { status: 401 });
+    }
+    return Response.json(live);
+  });
+  boot.access = { configured: true, authenticated: false, profile: null, turnstileSiteKey: "fixture-site-key" };
+  root.render(React.createElement(await App));
+  try {
+    await settle();
+    const form = document.querySelector(".welcome-agent-form");
+    assert.equal(form.elements.username.autocomplete, "username");
+    assert.equal(form.elements.password.autocomplete, "current-password");
+    const submit = form.querySelector('button[type="submit"]');
+    assert.equal(submit.disabled, true);
+    assert.equal(challenge.sitekey, "fixture-site-key");
+    assert.equal(challenge.action, "agent_login");
+    assert.equal(fetchStatus.mock.callCount(), 0);
+
+    form.elements.username.value = "operator";
+    form.elements.password.value = "initial-password";
+    challenge.callback("first-verification");
+    await settle();
+    assert.equal(submit.disabled, false);
+    form.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(resets, 1);
+    assert.equal(submit.disabled, true);
+    assert.match(form.querySelector('[role="alert"]').textContent, /Incorrect username or password/);
+
+    form.elements.password.value = "updated-password";
+    challenge.callback("fresh-verification");
+    await settle();
+    form.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    assert.deepEqual(attempts, [
+      { username: "operator", password: "initial-password", turnstileToken: "first-verification" },
+      { username: "operator", password: "updated-password", turnstileToken: "fresh-verification" },
+    ]);
+    assert.equal(document.querySelector(".stub-loading")?.textContent, "Checking Agent runtime");
+    assert.equal(fetchStatus.mock.calls[2].arguments[0], "/__octopus/runtime-status");
+    resolveStatus(Response.json({ phase: "ready", ready: true, home: "/server-home", storageHealth: null, interfaceFailures: [] }));
+    await settle();
+    assert.equal(shown(".stub-operator-shell"), true);
+    assert.equal(shown(".stub-launch"), false);
+  } finally {
+    root.render(null);
+    await settle(5);
+    delete w.turnstile;
+    globalThis.FormData = originalFormData;
+  }
+});
+
 test("the launch scene shows the launch shell, greets first, and exits only after the greeting", async () => {
   const writes = [];
   const data = new Set();

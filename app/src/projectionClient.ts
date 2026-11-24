@@ -1,3 +1,4 @@
+import { isWebClient, isAgentWebClient } from "./webClient";
 // The client reads the projection — there is no "bridge" concept in the architecture.
 // Two equal readers of the same engine (electron/projection.cjs):
 //   - the desktop app serves it over IPC (window.octopusTransport),
@@ -54,18 +55,18 @@ import {
   type ProjectionReadMethod,
 } from "./generated/projectionReadContract";
 
-const DEV_PROJECTION_URL = "/__octopus/projection";
-const DEV_PROVIDERS_URL = "/__octopus/providers";
-const DEV_SUBMIT_URL = "/__octopus/submit";
-const DEV_OPERATOR_CHAT_ARTIFACTS_URL = "/__octopus/operator-chat-artifacts";
-const DEV_OPERATOR_TURN_CONTROL_URL = "/__octopus/operator-turn-control";
-const DEV_STEER_URL = "/__octopus/chat-steer";
-const DEV_CHAT_PINS_URL = "/__octopus/chat-pins";
-const DEV_INTERFACE_ARTIFACT_URL = "/__octopus/interface-artifact";
-const DEV_ARTIFACT_STREAM_URL = "/__octopus/artifact-stream";
+const WEB_PROJECTION_URL = "/__octopus/projection";
+const WEB_PROVIDERS_URL = "/__octopus/providers";
+const WEB_SUBMIT_URL = "/__octopus/submit";
+const WEB_OPERATOR_CHAT_ARTIFACTS_URL = "/__octopus/operator-chat-artifacts";
+const WEB_OPERATOR_TURN_CONTROL_URL = "/__octopus/operator-turn-control";
+const WEB_STEER_URL = "/__octopus/chat-steer";
+const WEB_CHAT_PINS_URL = "/__octopus/chat-pins";
+const WEB_INTERFACE_ARTIFACT_URL = "/__octopus/interface-artifact";
+const WEB_ARTIFACT_STREAM_URL = "/__octopus/artifact-stream";
 
 export function hasProjectionBridge(): boolean {
-  return Boolean(window.octopusTransport?.projectionRead) || import.meta.env.DEV;
+  return Boolean(window.octopusTransport?.projectionRead) || isWebClient();
 }
 
 export function projectionTargetLabel(): string {
@@ -85,8 +86,8 @@ export async function readProjection<T = unknown, M extends ProjectionReadMethod
   if (bridge?.projectionRead) {
     return bridge.projectionRead(request) as Promise<T>;
   }
-  if (import.meta.env.DEV) {
-    const response = await fetch(DEV_PROJECTION_URL, {
+  if (isWebClient()) {
+    const response = await fetch(WEB_PROJECTION_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),
@@ -97,7 +98,7 @@ export async function readProjection<T = unknown, M extends ProjectionReadMethod
     }
     return payload as T;
   }
-  throw new Error("no projection reader is available: open the desktop app or the dev server");
+  throw new Error("no projection reader is available: open the desktop app or the Agent server");
 }
 
 export function canMutateScheduledInterfaces(): boolean {
@@ -154,8 +155,16 @@ export function onApplicationConnectionProgress(listener: (progress: OctopusAppl
 
 export async function mutateOctopusOsWorkspace(request: OctopusOsWorkspaceMutationRequest): Promise<OctopusOsWorkspaceMutationOutcome> {
   const host = window.octopusTransport;
-  if (!host?.mutateOctopusOsWorkspace) throw new Error("Octopus OS workspace editing is available only in the live desktop client.");
-  return host.mutateOctopusOsWorkspace(request);
+  if (host?.mutateOctopusOsWorkspace) return host.mutateOctopusOsWorkspace(request);
+  if (!isAgentWebClient()) throw new Error("Workspace editing requires a live desktop client or Agent server.");
+  const response = await fetch("/__octopus/workspace", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || `Workspace update failed: HTTP ${response.status}`);
+  return payload as OctopusOsWorkspaceMutationOutcome;
 }
 
 export async function saveSetupFile(request: { text: string; suggestedName: string }): Promise<{ saved: false } | { saved: true; name: string }> {
@@ -217,8 +226,8 @@ export async function readRuntimeProviderInterfaces(): Promise<OctopusProviderIn
   if (bridge?.providerInterfaces) {
     return bridge.providerInterfaces();
   }
-  if (import.meta.env.DEV) {
-    const httpResponse = await fetch(DEV_PROVIDERS_URL);
+  if (isWebClient()) {
+    const httpResponse = await fetch(WEB_PROVIDERS_URL);
     const payload = await httpResponse.json();
     if (!httpResponse.ok) {
       throw new Error(typeof payload?.error === "string" ? payload.error : `provider read failed: ${httpResponse.status}`);
@@ -334,7 +343,7 @@ function nullableNumberField(value: unknown): number | null {
 }
 
 export function canSubmitOperatorTurn(): boolean {
-  return Boolean(window.octopusTransport?.submitChatTurn) || import.meta.env.DEV;
+  return Boolean(window.octopusTransport?.submitChatTurn) || isWebClient();
 }
 
 export async function submitOperatorTurn(request: OctopusChatTurnRequest): Promise<OctopusChatTurnResponse> {
@@ -342,9 +351,9 @@ export async function submitOperatorTurn(request: OctopusChatTurnRequest): Promi
   if (bridge?.submitChatTurn) {
     return bridge.submitChatTurn(request);
   }
-  if (import.meta.env.DEV) {
+  if (isWebClient()) {
     if (request.attachments.length) throw new Error("Attachment submission requires the desktop attachment staging host.");
-    const response = await fetch(DEV_SUBMIT_URL, {
+    const response = await fetch(WEB_SUBMIT_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -352,6 +361,7 @@ export async function submitOperatorTurn(request: OctopusChatTurnRequest): Promi
         timeoutMs: request.timeoutMs,
         messageId: request.messageId,
         recoverPreparedMessage: request.recoverPreparedMessage,
+        replacesMessage: request.replacesMessage,
         runId: request.runId,
         providerInterfaceId: request.providerInterfaceId,
         providerModel: request.providerModel,
@@ -364,6 +374,7 @@ export async function submitOperatorTurn(request: OctopusChatTurnRequest): Promi
         externalRelays: request.externalRelays,
         modelOutputs: request.modelOutputs,
         contextArtifactBindings: request.contextArtifactBindings,
+        payloadArtifactBindings: request.payloadArtifactBindings,
         selectedWorkerEnvironmentKinds: request.selectedWorkerEnvironmentKinds,
         selectedTools: request.selectedTools,
         clientSurfaceRole: request.clientSurfaceRole,
@@ -374,12 +385,23 @@ export async function submitOperatorTurn(request: OctopusChatTurnRequest): Promi
       }),
     });
     const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(typeof payload?.error === "string" ? payload.error : `submit failed: ${response.status}`);
-    }
+    if (!response.ok) throwOperatorSubmitError(response, payload);
     return payload as OctopusChatTurnResponse;
   }
-  throw new Error("no local writer is available for the operator turn: open the desktop app or the dev server");
+  throw new Error("no local writer is available for the operator turn: open the desktop app or the Agent server");
+}
+
+function throwOperatorSubmitError(response: Response, payload: {
+  contract?: string;
+  error?: string | { message: string; code: string; retryable: boolean; deliveryState: string };
+}): never {
+  if (payload.contract === "octopus.operator-chat.submit.v1" && payload.error && typeof payload.error === "object") {
+    const { message, ...details } = payload.error;
+    throw Object.assign(new Error(message), { name: "OctopusChatSubmitError", ...details });
+  }
+  throw Object.assign(new Error(typeof payload.error === "string" ? payload.error : `Message submission failed: HTTP ${response.status}`), {
+    deliveryState: [400, 401, 403, 405, 415].includes(response.status) ? "not_sent" : "unknown",
+  });
 }
 
 export async function readOperatorChatArtifacts(
@@ -389,8 +411,8 @@ export async function readOperatorChatArtifacts(
   if (bridge?.readOperatorChatArtifacts) {
     return bridge.readOperatorChatArtifacts(request);
   }
-  if (import.meta.env.DEV) {
-    const response = await fetch(DEV_OPERATOR_CHAT_ARTIFACTS_URL, {
+  if (isWebClient()) {
+    const response = await fetch(WEB_OPERATOR_CHAT_ARTIFACTS_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),
@@ -414,8 +436,8 @@ export async function submitOperatorTurnControl(
   if (window.octopusTransport?.submitOperatorTurnControl) {
     return window.octopusTransport.submitOperatorTurnControl(request);
   }
-  if (!import.meta.env.DEV) return { deliveryError: { stage: "not-sent", message: "No local operator turn-control writer is available." } };
-  const response = await fetch(DEV_OPERATOR_TURN_CONTROL_URL, {
+  if (!isWebClient()) return { deliveryError: { stage: "not-sent", message: "No local operator turn-control writer is available." } };
+  const response = await fetch(WEB_OPERATOR_TURN_CONTROL_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(request),
@@ -431,15 +453,15 @@ export async function submitOperatorTurnControl(
 }
 
 export function canSubmitOperatorSteer(): boolean {
-  return Boolean(window.octopusTransport?.submitChatSteer) || import.meta.env.DEV;
+  return Boolean(window.octopusTransport?.submitChatSteer) || isWebClient();
 }
 
 export async function submitOperatorSteer(request: OctopusChatSteerRequest): Promise<OctopusChatSteerResponse> {
   const host = window.octopusTransport;
   if (host?.submitChatSteer) return host.submitChatSteer(request);
-  if (!import.meta.env.DEV) throw new Error("No local writer is available for an in-flight operator message.");
+  if (!isWebClient()) throw new Error("No local writer is available for an in-flight operator message.");
   if (request.attachments.length) throw new Error("Attachment submission requires the desktop attachment staging host.");
-  const response = await fetch(DEV_STEER_URL, {
+  const response = await fetch(WEB_STEER_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -459,17 +481,15 @@ export async function submitOperatorSteer(request: OctopusChatSteerRequest): Pro
     }),
   });
   const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(typeof payload?.error === "string" ? payload.error : `steer failed: ${response.status}`);
-  }
+  if (!response.ok) throwOperatorSubmitError(response, payload);
   return payload as OctopusChatSteerResponse;
 }
 
 export async function updateOperatorChatPins(request: OctopusChatPinsRequest): Promise<OctopusChatPinsResponse> {
   const bridge = window.octopusTransport;
   if (bridge?.updateChatPins) return bridge.updateChatPins(request);
-  if (!import.meta.env.DEV) throw new Error("no local operator chat editor is available");
-  const response = await fetch(DEV_CHAT_PINS_URL, {
+  if (!isWebClient()) throw new Error("no local operator chat editor is available");
+  const response = await fetch(WEB_CHAT_PINS_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(request),
@@ -495,8 +515,8 @@ export async function submitInterfaceArtifact(request: OctopusInterfaceArtifactR
   if (window.octopusTransport?.submitInterfaceArtifact) {
     return window.octopusTransport.submitInterfaceArtifact(request);
   }
-  if (!import.meta.env.DEV) throw new Error("No interface artifact writer is available.");
-  const response = await fetch(DEV_INTERFACE_ARTIFACT_URL, {
+  if (!isWebClient()) throw new Error("No interface artifact writer is available.");
+  const response = await fetch(WEB_INTERFACE_ARTIFACT_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(request),
@@ -538,8 +558,8 @@ export async function abortInterfaceArtifactStream(request: OctopusArtifactStrea
 }
 
 async function artifactStreamRequest<T>(operation: "begin" | "append" | "finalize" | "abort", request: unknown): Promise<T> {
-  if (!import.meta.env.DEV) throw new Error("No interface artifact stream transport is available.");
-  const response = await fetch(`${DEV_ARTIFACT_STREAM_URL}/${operation}`, {
+  if (!isWebClient()) throw new Error("No interface artifact stream transport is available.");
+  const response = await fetch(`${WEB_ARTIFACT_STREAM_URL}/${operation}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(request),

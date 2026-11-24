@@ -1,0 +1,116 @@
+{
+  "schema": "octopus.local_application_pack",
+  "schema_version": 1,
+  "id": "openrouter-headless",
+  "version": "1.0.0",
+  "name": "OpenRouter Headless",
+  "description": "OpenRouter chat and web search, with Telegram available for explicitly connected tasks.",
+  "components": [
+    {
+      "package_id": "world_provider_openrouter",
+      "selection": "included",
+      "reason": "Provides model access through an OpenRouter API key."
+    },
+    {
+      "package_id": "world_operator_chat",
+      "selection": "included",
+      "reason": "Provides Home and task conversations for the terminal and remote clients."
+    },
+    {
+      "package_id": "driver.system_room",
+      "selection": "included",
+      "reason": "Provides task authoring and context operations."
+    },
+    {
+      "package_id": "driver.web_search",
+      "selection": "included",
+      "reason": "Allows Home and tasks to use a declared web search provider."
+    },
+    {
+      "package_id": "world_telegram",
+      "selection": "included",
+      "reason": "Lets explicitly connected tasks receive Telegram events and reply as a bot."
+    },
+    {
+      "package_id": "world_provider_codex",
+      "selection": "included",
+      "reason": "Package dependency of OpenRouter."
+    },
+    {
+      "package_id": "driver.browser_session",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "driver.code_mode",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "driver.desktop_session",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "driver.filesystem_workspace",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "artifact.codex_context",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "world_provider_realtime",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "system_memory",
+      "selection": "included",
+      "reason": "Package dependency of Octopus Home."
+    },
+    {
+      "package_id": "driver.audio_device_session",
+      "selection": "included",
+      "reason": "Package dependency of Desktop Session."
+    }
+  ],
+  "workspace_setup": {
+    "selection": "included",
+    "home": {
+      "provider_interface_id": "world_provider_openrouter",
+      "default_model": "deepseek/deepseek-v4.1-flash-1017",
+      "default_reasoning_effort": "none",
+      "worker_interface_id": "system_worker_operator_home",
+      "context_artifact_bindings": [],
+      "selected_worker_environment_kinds": [
+        "system_room",
+        "web_search"
+      ]
+    },
+    "task": {
+      "worker_interface_id": "system_worker_operator_task",
+      "context_artifact_bindings": [],
+      "selected_worker_environment_kinds": [
+        "system_room",
+        "web_search"
+      ]
+    },
+    "project_defaults": [
+      {
+        "package_id": "world_provider_openrouter",
+        "default_for_new_tasks": true
+      },
+      {
+        "package_id": "driver.web_search",
+        "default_for_new_tasks": true
+      },
+      {
+        "package_id": "world_telegram",
+        "default_for_new_tasks": false
+      }
+    ]
+  }
+}

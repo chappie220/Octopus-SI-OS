@@ -1192,6 +1192,7 @@ export type OctopusClientAccessStatus = {
   authenticated: boolean;
   profile: OctopusClientAccessProfile | null;
   expiresAt: string | null;
+  turnstileSiteKey?: string;
 };
 
 export type OctopusTouchIdStatus = {

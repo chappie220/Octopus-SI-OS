@@ -34,7 +34,8 @@
           "openai/gpt-6.1-sol",
           "openai/gpt-6.1-terra",
           "openai/gpt-6-sol",
-          "openai/gpt-6-luna"
+          "openai/gpt-6-luna",
+          "deepseek/deepseek-v4.1-flash-1017"
         ]
       }
     }
@@ -2586,6 +2587,28 @@
             }
           ],
           "show_in_picker": true
+        },
+        {
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "display_name": "DeepSeek V4.1 Flash 1017",
+          "description": "DeepSeek V4.1 Flash 1017 through OpenRouter.",
+          "context_window": 1000000,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supports_tools": true,
+          "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
+          "show_in_picker": true
         }
       ],
       "model_catalog_operation": {
@@ -3035,6 +3058,40 @@
               "supports_parallel_tool_calls": false,
               "context_window": 400000,
               "max_context_window": 1050000,
+              "effective_context_window_percent": 95,
+              "experimental_supported_tools": [],
+              "input_modalities": [
+                "text"
+              ],
+              "supports_search_tool": false,
+              "use_responses_lite": false
+            },
+            {
+              "slug": "deepseek/deepseek-v4.1-flash-1017",
+              "display_name": "DeepSeek V4.1 Flash 1017",
+              "description": "DeepSeek V4.1 Flash 1017 through OpenRouter.",
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
+              "shell_type": "shell_command",
+              "visibility": "list",
+              "supported_in_api": true,
+              "priority": 9,
+              "base_instructions": "",
+              "supports_reasoning_summaries": false,
+              "default_reasoning_summary": "auto",
+              "support_verbosity": false,
+              "truncation_policy": {
+                "mode": "tokens",
+                "limit": 10000
+              },
+              "supports_parallel_tool_calls": false,
+              "context_window": 400000,
+              "max_context_window": 1000000,
               "effective_context_window_percent": 95,
               "experimental_supported_tools": [],
               "input_modalities": [

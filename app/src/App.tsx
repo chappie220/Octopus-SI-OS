@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import "./components/icon-glyphs/shell";
 import { OperatorShell } from "./components/shell/OperatorShell";
 import { WelcomeOverlay } from "./components/onboarding/WelcomeOverlay";
+import { AgentSignIn } from "./components/onboarding/AgentSignIn";
 import { PasswordGate } from "./components/onboarding/PasswordGate";
 import { StateMorphDotCloud } from "./components/onboarding/MorphVideoDotCloud";
 import { LaunchTerminal } from "./components/onboarding/LaunchTerminal";
@@ -19,6 +20,7 @@ import { useClientAccess } from "./useClientAccess";
 import type { OctopusClientAccessStatus, OctopusTouchIdStatus } from "./electron";
 import { appToast, AppToastViewport } from "./toasts";
 import { ClientPreferencesProvider } from "./clientPreferences";
+import { isAgentWebClient } from "./webClient";
 import { useRuntimeHost } from "./runtimeHost";
 import { MAIN_CLIENT_WINDOW_BOOTSTRAP } from "./shell/clientWindowModel";
 
@@ -37,7 +39,8 @@ export function App() {
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(() => initializeOnboarding());
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const { access, accessError, setAccess } = useClientAccess();
-  const runtimeHost = useRuntimeHost();
+  const agentWebClient = isAgentWebClient();
+  const runtimeHost = useRuntimeHost(access?.profile);
   const windowMode = useMemo(() => new URLSearchParams(window.location.search).get("window"), []);
   const clientWindow = useMemo(
     () => window.octopusTransport?.clientWindowBootstrap?.() ?? MAIN_CLIENT_WINDOW_BOOTSTRAP,
@@ -45,10 +48,10 @@ export function App() {
   );
   const primaryWindowControls = windowMode ? null : <TrafficLights />;
   const welcomeMode = useMemo(() => new URLSearchParams(window.location.search).get("welcome"), []);
-  const showWelcome = !welcomeDismissed && (onboardingState.completed !== true || welcomeMode === "1");
+  const showWelcome = !agentWebClient && !welcomeDismissed && (onboardingState.completed !== true || welcomeMode === "1");
   const localUnlockRequired = Boolean(access?.configured && !access.authenticated);
   const [runtimeHasBeenReady, setRuntimeHasBeenReady] = useState(runtimeHost.ready);
-  const launchGate = access?.profile !== "lab"
+  const launchGate = !agentWebClient && access?.profile !== "lab"
     && runtimeHost.available
     && runtimeHost.phase !== "probing"
     && runtimeHost.phase !== "access_required"
@@ -73,12 +76,12 @@ export function App() {
           <div className="welcome-access-state" role={accessError ? "alert" : "status"}>
             {accessError ? (
               <>
-                <strong>Client access host is unavailable</strong>
+                <strong>{agentWebClient ? "Unable to connect to the Agent server" : "Client access host is unavailable"}</strong>
                 <span>{accessError}</span>
                 <button onClick={() => window.location.reload()} type="button">Reload</button>
               </>
             ) : (
-              <OctopusLoadingState className="app-loading-state" label="Connecting to the local client host" />
+              <OctopusLoadingState className="app-loading-state" label={agentWebClient ? "Connecting to the Agent server" : "Connecting to the local client host"} />
             )}
           </div>
         </main>
@@ -87,7 +90,7 @@ export function App() {
     );
   }
 
-  if (windowMode === "quick-task") {
+  if (!agentWebClient && windowMode === "quick-task") {
     if (!access.authenticated || !access.profile) return <Suspense fallback={null}><QuickTaskAccessUnavailable /></Suspense>;
     return (
       <Suspense fallback={null}>
@@ -101,7 +104,7 @@ export function App() {
     );
   }
 
-  if (windowMode === "worker-environment") {
+  if (!agentWebClient && windowMode === "worker-environment") {
     if (!access.authenticated || !access.profile) return <Suspense fallback={null}><WorkerEnvironmentWindowAccessUnavailable /></Suspense>;
     return (
       <Suspense fallback={null}>
@@ -115,7 +118,7 @@ export function App() {
     );
   }
 
-  if (windowMode === "task-monitor") {
+  if (!agentWebClient && windowMode === "task-monitor") {
     if (!access.authenticated || !access.profile) return <Suspense fallback={null}><TaskMonitorAccessUnavailable /></Suspense>;
     return (
       <Suspense fallback={null}>
@@ -145,11 +148,15 @@ export function App() {
     );
   }
 
+  if (agentWebClient && !access.authenticated) {
+    return <AgentSignIn siteKey={access.turnstileSiteKey} onDone={setAccess} />;
+  }
+
   if (localUnlockRequired) {
     return <>{primaryWindowControls}<LockScreen mode="unlock" onUnlock={setAccess} /><AppToastViewport /></>;
   }
 
-  if (access.profile !== "lab" && runtimeHost.available && runtimeHost.phase === "probing" && !runtimeHasBeenReady) {
+  if (!agentWebClient && access.profile !== "lab" && runtimeHost.available && runtimeHost.phase === "probing" && !runtimeHasBeenReady) {
     return <>{primaryWindowControls}<OctopusLoadingState className="app-loading-state" label="Opening Octopus" /><AppToastViewport /></>;
   }
 
@@ -175,20 +182,46 @@ export function App() {
     return <>{primaryWindowControls}<LockScreen mode="set" onUnlock={setAccess} />{launchOverlay}<AppToastViewport /></>;
   }
 
+  const logOut = () => void lockClientAccess().then(setAccess).catch((error) => {
+    appToast.danger(error instanceof Error ? error.message : String(error));
+  });
+  if (agentWebClient && !runtimeHasBeenReady && !runtimeHost.ready) {
+    return (
+      <main className="welcome">
+        <div className="welcome-access-state" role="status">
+          {runtimeHost.phase === "probing" ? (
+            <OctopusLoadingState className="app-loading-state" label="Checking Agent runtime" />
+          ) : (
+            <>
+              <strong>{runtimeHost.phase === "setup_required" ? "Agent Home is not ready" : "Agent runtime is unavailable"}</strong>
+              <span>{runtimeHost.error}</span>
+              {runtimeHost.phase === "setup_required" && <span>Run <code>./octopus setup</code> on the server to configure this Home.</span>}
+              <button onClick={logOut} type="button">Sign out</button>
+            </>
+          )}
+        </div>
+        <AppToastViewport />
+      </main>
+    );
+  }
+
+  const shell = (
+    <OperatorShell
+      accessProfile={access.profile}
+      clientWindow={clientWindow}
+      onLogOut={logOut}
+      runtimeHost={runtimeHost}
+    />
+  );
   return (
     <>
       {primaryWindowControls}
       <ClientPreferencesProvider profile={access.profile}>
-        <WorkspaceSetupGate accessProfile={access.profile} runtimeHome={runtimeHost.home}>
-          <OperatorShell
-            accessProfile={access.profile}
-            clientWindow={clientWindow}
-            onLogOut={() => void lockClientAccess().then(setAccess).catch((error) => {
-              appToast.danger(error instanceof Error ? error.message : String(error));
-            })}
-            runtimeHost={runtimeHost}
-          />
-        </WorkspaceSetupGate>
+        {agentWebClient ? shell : (
+          <WorkspaceSetupGate accessProfile={access.profile} runtimeHome={runtimeHost.home}>
+            {shell}
+          </WorkspaceSetupGate>
+        )}
       </ClientPreferencesProvider>
       {launchOverlay}
       <AppToastViewport anchorToWorkspace />
