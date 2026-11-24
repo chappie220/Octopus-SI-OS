@@ -295,6 +295,29 @@ async fn exercise_interrupted_source_order(
         let record = RunRecord::from_bytes(&before).unwrap();
         assert!(cold.settled_input_definition(&record, &before).unwrap(), "the exact completed write is a settled definition, detached={detached}");
         assert!(matches!(cold.recover_authoring_attempt(&record, &before).unwrap(), AuthoringAttemptRecovery::InFlight(_)));
+        if detached {
+            let socket = octopus_app_server_interface::interface_control_socket_path_from_root(
+                cold.ctx.root_slot("app_server_control_root").unwrap(), &cold.config.authoring_source_interface,
+            );
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let refuse = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let request = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                assert_eq!(request.as_str().as_bytes(), std::fs::read(carrier.manifest_path()).unwrap());
+                let verdict = DeliveryVerdict::refused(octopus_ledger::RefusedReason::CheckpointSpent, serde_json::json!({}));
+                ws.send(WsMessage::Text(serde_json::to_string(&verdict).unwrap().into())).await.unwrap();
+            };
+            let mut state = cold.state.lock().await.clone();
+            state.run_record_bytes = before.clone();
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::join!(cold.install_with_writer_run(&mut state, &saved), refuse)
+            }).await.expect("spent writer call without an outbound movement must finish after one hand-in");
+            assert!(matches!(result, Err(error) if error.contains("checkpoint_spent without a matching durable outbound call")));
+            assert_eq!(std::fs::read(&cold.run_path).unwrap(), before);
+            drop(listener);
+            std::fs::remove_file(socket).unwrap();
+        }
         let writer = declared_provider_run_writer(&record, &cold.ctx.interface, &run_authoring_profile(descriptor).unwrap()).unwrap();
         let desired = cold.config.checkpoints.iter().filter(|cp| cp.role == RunAuthoringCheckpointRole::OwnerInput).map(|cp| {
             let mut cp = cp.clone(); if cp.name == "future_owner_result" { cp.include_context = true; }
