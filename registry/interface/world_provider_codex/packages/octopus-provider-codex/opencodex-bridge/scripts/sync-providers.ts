@@ -5,6 +5,14 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type DeclaredModel = {
+  slug: string;
+  display_name: string;
+  context_window?: number;
+  input_modalities?: string[];
+  efforts: Effort[];
+  default_effort?: Effort;
+};
 
 type ProviderSpec = {
   interface: string;
@@ -37,7 +45,8 @@ type ProviderSpec = {
   };
   account?: { provider: string; client_module: string; disclosure: string[] };
   endpoint?: string;
-  models?: Array<{ slug: string; display_name: string; context_window?: number; input_modalities?: string[]; efforts: Effort[]; default_effort?: Effort }>;
+  models?: DeclaredModel[];
+  additional_models?: DeclaredModel[];
   model_guide?: string;
   acp?: { residual_sources: Array<Record<string, unknown>> };
   vertex?: { location: string; project: { env: string; label: string }; credentials: { env: string; label: string } };
@@ -162,8 +171,8 @@ function registryModels(spec: ProviderSpec, seed: any): ModelRow[] {
   }));
 }
 
-function declaredModels(spec: ProviderSpec): ModelRow[] {
-  return spec.models!.map((row) => ({
+function declaredModels(models: DeclaredModel[], spec: ProviderSpec): ModelRow[] {
+  return models.map((row) => ({
     slug: row.slug,
     display_name: row.display_name,
     ...(row.context_window ? { context_window: row.context_window } : {}),
@@ -477,7 +486,9 @@ for (const provider of spec.providers) {
   if (provider.endpoint && entry) throw new Error(`${provider.interface}: a registry entry already names its endpoint`);
   const baseUrl = provider.base_url ? "" : seed?.baseUrl ?? provider.endpoint;
   if (!provider.base_url && !baseUrl) throw new Error(`${provider.interface}: no base URL`);
-  const rows = provider.models ? [...declaredModels(provider), ...(provider.model ? setupModel(provider) : [])] : provider.model ? setupModel(provider) : registryModels(provider, seed);
+  const rows = provider.models ? [...declaredModels(provider.models, provider), ...(provider.model ? setupModel(provider) : [])] : provider.model ? setupModel(provider) : registryModels(provider, seed);
+  rows.push(...declaredModels(provider.additional_models ?? [], provider));
+  if (new Set(rows.map((row) => row.slug)).size !== rows.length) throw new Error(`${provider.interface}: model catalog has duplicate slugs`);
   const folder = path.join(interfaceRoot, provider.interface);
   const logos: { logo?: string; logo_dark?: string } = {};
   if (provider.icon && provider.logo) throw new Error(`${provider.interface}: a logo comes either from an OpenCodex icon or from the interface folder`);

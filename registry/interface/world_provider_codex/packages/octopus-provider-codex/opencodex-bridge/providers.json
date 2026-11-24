@@ -371,7 +371,15 @@
       },
       "headers": {
         "X-Title": "Octopus"
-      }
+      },
+      "additional_models": [
+        {
+          "slug": "deepseek/deepseek-v4.1-flash-1017",
+          "display_name": "DeepSeek V4.1 Flash 1017",
+          "context_window": 1000000,
+          "efforts": []
+        }
+      ]
     },
     {
       "interface": "world_provider_mistral",
