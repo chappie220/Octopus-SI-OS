@@ -660,6 +660,7 @@ test("local expiry returns to unlock before Home verification and ignores stale 
   const { useClientAccess } = loadTs("useClientAccess.ts", { "./clientAccess": { readClientAccessStatus: () => read() } });
   const { App } = loadTs("App.tsx", {
     "./useClientAccess": { useClientAccess: () => (access = useClientAccess()) },
+    "./webClient": { isAgentWebClient: () => false },
     "./clientAccess": { readTouchIdStatus: async () => ({ available: false }) },
     "./onboarding/onboardingStorage": { recordOnboardingVisit: () => ({ completed: true }) },
     "./runtimeHost": { useRuntimeHost: () => ({ ready: true, available: true, phase: "ready" }) },

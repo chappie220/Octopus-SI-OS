@@ -1846,9 +1846,11 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         authored: &AuthoredRun,
     ) -> Result<AuthoredRunInstallOutcome, String> {
-        let maximum = self.ctx.required_host_io_limits()?.max_payload_bytes;
+        let limits = self.ctx.required_host_io_limits()?;
+        let maximum = limits.max_payload_bytes;
         let mut planned = authored.clone();
         let mut known: Option<(String, InterfaceArtifactFile, OrderedArguments, u64)> = None;
+        let mut submitted = None;
         loop {
             if self.ctx.cancel.is_cancelled() {
                 return Err("provider ordered file write was cancelled while it awaited its admitted result".into());
@@ -1860,6 +1862,7 @@ impl ProviderOutputHandoff {
             if known.as_ref().is_none_or(|(after_hash, _, _, generation)| {
                 *after_hash != planned.after_hash || progress.voided.values().any(|voided| voided == generation)
             }) {
+                submitted = None;
                 known = self
                     .writer_attempts(correlation_generation(&self.config.run, &planned.correlation_id)?)?
                     .into_iter()
@@ -1958,20 +1961,38 @@ impl ProviderOutputHandoff {
                 known = Some((planned.after_hash.clone(), manifest.clone(), call.arguments, generation));
                 manifest
             };
-            if progress.pending.is_none() {
-                let verdict = self
-                    .send_authoring_manifest(
-                        &std::fs::read(manifest.manifest_path()).map_err(|e| e.to_string())?,
-                    )
-                    .await?;
-                if let DeliveryVerdict::Refused { reason, detail } = verdict {
-                    if reason != octopus_interfaces::RefusedReason::CheckpointSpent {
-                        return Err(format!(
-                            "writer hand-in refused {}: {detail}",
-                            reason.as_str()
-                        ));
+            if let Some((_, _, call)) = &progress.pending {
+                let manifest = manifest.read_manifest_bounded(limits.max_manifest_bytes)
+                    .map_err(|error| error.to_string())?;
+                let content = ContentHash::of_bytes(&manifest.manifest_bytes);
+                let reference = ArtifactRef {
+                    id: ArtifactId::new(format!("{}:{}", manifest.manifest.label, content.to_hex())),
+                    content,
+                };
+                if call.artifact.as_ref() != Some(&reference) {
+                    return Err(format!("writer Run already has a different admitted attempt at movement {}", call.seq.0));
+                }
+            } else if let Some(verdict) = &submitted {
+                return Err(match verdict {
+                    DeliveryVerdict::Admitted { seq } => format!(
+                        "writer hand-in admitted at movement {seq} has no durable outbound call to the authoring room"
+                    ),
+                    DeliveryVerdict::Refused { reason, detail } => format!(
+                        "writer hand-in refused {} without a matching durable outbound call: {detail}",
+                        reason.as_str()
+                    ),
+                });
+            } else {
+                let manifest = manifest.read_manifest_bounded(limits.max_manifest_bytes)
+                    .map_err(|error| error.to_string())?;
+                let verdict = self.send_authoring_manifest(&manifest.manifest_bytes).await?;
+                if let DeliveryVerdict::Refused { reason, detail } = &verdict {
+                    if *reason != octopus_interfaces::RefusedReason::CheckpointSpent {
+                        return Err(format!("writer hand-in refused {}: {detail}", reason.as_str()));
                     }
                 }
+                submitted = Some(verdict);
+                continue;
             }
             tokio::select! {
                 _ = self.ctx.cancel.cancelled() => {}

@@ -20,6 +20,7 @@ const HELP = `Octopus — your agentic operating system, in the terminal
   octopus project policies        Show policies available to a parent Project
   octopus project delete <id> --yes  Delete a Project
   octopus application connect <id> [interface]  Connect an installed Application using its declared environment
+  octopus application repair <id>  Update an installed Application from the selected runtime distribution
   octopus agent create <name>     Create an Agent with an explicit model
   octopus agent delete <id> --yes  Delete an Agent
   octopus models                  Show available permitted models
@@ -129,8 +130,12 @@ async function main(argv = process.argv.slice(2), io = process) {
     if (flags.port !== undefined && command !== "serve") throw new Error("--port is available only for serve.");
     if (command === "application") {
       const [action, applicationId, interfaceId = applicationId, ...remaining] = words;
+      if (action === "repair" && applicationId && words.length === 2) {
+        report(await environment.repairApplication({ applicationId, operationId: randomUUID() }));
+        return 0;
+      }
       if (action !== "connect" || !applicationId || remaining.length) {
-        throw new Error("Use 'application connect <id> [interface]'.");
+        throw new Error("Use 'application connect <id> [interface]' or 'application repair <id>'.");
       }
       const controller = new AbortController();
       signalHandler = () => controller.abort();

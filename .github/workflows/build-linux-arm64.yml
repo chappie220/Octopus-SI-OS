@@ -41,11 +41,27 @@ jobs:
         run: npm --prefix app run build
 
       - name: Verify build outputs
+        shell: bash
         run: |
-          test -d app/build/cli
-          test -d app/build
-          ls -la app/build/cli
-          cat app/build/cli/runtime-build-receipt.json 2>/dev/null || true
+          runtime=app/build/cli/runtime
+          provider="$runtime/local-packages/registry/interface/world_provider_codex/packages/octopus-provider-codex"
+          life="$provider/life-bin/octopus-provider-opencodex-life"
+          test -f app/dist/index.html
+          test -x "$runtime/bin/octopus"
+          test -x "$life"
+          cmp target/release/octopus-provider-opencodex-life "$life"
+          readelf -h "$life" | grep -E 'Machine:[[:space:]]+AArch64$'
+          cat "$runtime/runtime-build-receipt.json"
+          cat "$provider/build-receipt.json"
+          {
+            echo "### Linux ARM64 runtime"
+            echo
+            echo "Commit: \`$(git rev-parse HEAD)\`"
+            echo
+            echo '```text'
+            sha256sum "$runtime/bin/octopus" "$life"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Linux ARM64 build
         uses: actions/upload-artifact@v4
