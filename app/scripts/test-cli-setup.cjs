@@ -108,8 +108,11 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
   const first = createEnvironment(options), second = createEnvironment(options);
   const source = path.join(first.packageRoots.sourceRegistryRoot, "interface", "world_cli_fixture", "interface.json");
   const active = path.join(first.packageRoots.activeRegistryRoot, "interface", "world_cli_fixture", "interface.json");
+  const providerLife = path.join(path.dirname(source), "life");
+  const installedLife = path.join(path.dirname(active), "life");
   const original = { id: "world_cli_fixture", interface_type: "world", role: "provider", direction: "bidirectional", source_names: ["fixture"], config: { model: "default" }, contract: 1 };
   await json(source, original);
+  await fs.writeFile(providerLife, "old executable", { mode: 0o755 });
   await json(path.join(first.packageRoots.libraryRoot, "packages", "cli.fixture.json"), {
     schema: "octopus.local_package", schema_version: 1, id: "cli.fixture", version: "1.0.0", product_kind: "application", product_id: original.id, release_status: "optional",
     display: { name: "Fixture", description: "CLI installed package isolation", developer: "Octopus", category: "provider" },
@@ -121,6 +124,7 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
   await installLocalPackages({ ...first.packageRoots, operationId: "cli_fixture_install_001", packageIds: ["cli.fixture"], expectedSourceDigests: { "cli.fixture": (await packageState()).source_digest } });
   await json(active, { ...original, config: { model: "selected" } });
   await json(source, { ...original, contract: 2 });
+  await fs.writeFile(providerLife, "new executable");
   const pendingRecord = path.join(home, "state/runs/private_task/run.json");
   await json(pendingRecord, { pending: "preserve" });
   try {
@@ -131,6 +135,8 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
     assert.equal(await fs.readFile(path.join(home, "starts"), "utf8"), "start\n");
     assert.deepEqual(JSON.parse(await fs.readFile(active)), { ...original, config: { model: "selected" } });
     assert.equal((await packageState()).receipt_state, "valid");
+    await assert.rejects(first.repairApplication({ applicationId: "cli.fixture", operationId: "cli_fixture_repair_live" }), /Stop the Octopus runtime/);
+    assert.equal(await fs.readFile(installedLife, "utf8"), "old executable");
     assert.deepEqual(JSON.parse(await fs.readFile(pendingRecord)), { pending: "preserve" });
     await json(source, { ...original, contract: 3 });
     await first.start({ interfaceId: "fixture_home", timeoutMs: 5000 });
@@ -146,6 +152,11 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
     const current = await first.status({ interfaceId: "fixture_home" });
     if (current.pid) { process.kill(current.pid, "SIGTERM"); await waitStopped(first); }
   }
+  assert.equal((await first.repairApplication({ applicationId: "cli.fixture", operationId: "cli_fixture_repair_stopped" })).changed, true);
+  assert.equal(await fs.readFile(installedLife, "utf8"), "new executable");
+  assert.ok((await fs.stat(installedLife)).mode & 0o111);
+  assert.deepEqual(JSON.parse(await fs.readFile(active)), { ...original, config: { model: "selected" }, contract: 3 });
+  assert.deepEqual(JSON.parse(await fs.readFile(pendingRecord)), { pending: "preserve" });
   await json(active, { ...original, config: { model: "selected" }, contract: 999 });
   try {
     await first.start({ interfaceId: "fixture_home", timeoutMs: 5000 });

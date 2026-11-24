@@ -50,6 +50,34 @@ Applications and the Web Search Driver through the normal package interface.
 If the runtime already started before you edited `.env`, use `./octopus down`
 then `./octopus up` so its interfaces inherit the new values.
 
+### Check the provider after an update
+
+The ARM64 workflow records the SHA-256 of the packaged `octopus-provider-opencodex-life`
+in its job summary. OpenRouter imports this executable from the `world_provider_codex`
+package in the active Home. An existing Home retains its installed package when
+the distribution is replaced. Stop the runtime and its supervisor, if used,
+then repair the installed package from the updated checkout and distribution:
+
+```sh
+./octopus application repair world_provider_codex
+```
+
+Start the runtime again after the repair succeeds. Use the same `--home`
+selection as the running service and pass `--bundle` if the distribution is
+outside the checkout's default location.
+
+From the checkout, compare the packaged copy, the installed copy, and the running
+provider. Set `provider_pid` to the OpenRouter provider process ID on the Pi.
+
+```sh
+home=${OCTOPUS_HOME:-"$HOME/.octopus"}
+life=interface/world_provider_codex/packages/octopus-provider-codex/life-bin/octopus-provider-opencodex-life
+sha256sum "app/build/cli/runtime/local-packages/registry/$life" \
+  "$home/registry/$life" "/proc/$provider_pid/exe"
+```
+
+When the provider is running from the updated package, all three hashes match.
+
 ## Chat with the Telegram bot
 
 Create a bot in @BotFather, open its private chat, and press **Start**. For a

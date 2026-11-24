@@ -11,7 +11,7 @@ const { normalizedEndpoint } = require("../electron/interfaceTransport.cjs");
 const { createChatgptSignIn } = require("../electron/chatgptSignIn.cjs");
 const { createProjectionStore } = require("../electron/projection.cjs");
 const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
-const { recoverLocalPackageTransactions, registerLocalPackageMutationGuard } = require("../electron/localPackages.cjs");
+const { inspectLocalPackageInstallation, recoverLocalPackageTransactions, registerLocalPackageMutationGuard, repairLocalPackages } = require("../electron/localPackages.cjs");
 const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
@@ -115,6 +115,7 @@ function createEnvironment(options = {}) {
     async doctor(request = {}) { return runRuntimeCommand(environment, "doctor", request); },
     requireDistribution() { return requireDistribution(environment); },
     async setup(request = {}) { return require("./setup.cjs").setupEnvironment(environment, request); },
+    async repairApplication(request) { return repairApplication(environment, request); },
     async connectApplication(request, options = {}) {
       const { createApplicationConnectionHost, createRegistryConnectionTargets } = require("../electron/applicationConnection.cjs");
       const host = createApplicationConnectionHost({
@@ -258,14 +259,35 @@ function runtimeChildEnv(environment) {
   return childEnv;
 }
 
+async function assertRuntimeStopped(environment, host, message, signal) {
+  assertNotAborted(signal);
+  const current = await host.probe();
+  if (current.phase !== "unmanaged" || current.ready || current.ownership !== "none" || current.pid !== null || current.error) {
+    throw runtimeError(message, environment);
+  }
+}
+
+async function repairApplication(environment, { applicationId, operationId }) {
+  const roots = environment.packageRoots;
+  const host = runtimeHost(environment);
+  const assertStopped = () => assertRuntimeStopped(environment, host, "Stop the Octopus runtime before repairing an installed Application.");
+  await assertStopped();
+  const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: roots.stateRoot, guard: assertStopped });
+  try {
+    await recoverLocalPackageTransactions(roots);
+    const entry = await inspectLocalPackageInstallation({ ...roots, packageId: applicationId });
+    if (entry.product_kind !== "application") throw new Error(`Package '${applicationId}' is not an Application.`);
+    return await repairLocalPackages({
+      ...roots, operationId, packageIds: [applicationId],
+      expectedRepairs: { [applicationId]: { sourceDigest: entry.source_digest, installedDigest: entry.installed_digest,
+        receiptState: entry.receipt_state, receiptDigest: entry.receipt_digest || null } },
+    });
+  } finally { releaseGuard(); }
+}
+
 async function recoverStoppedTransactions(environment, host, signal) {
-  const assertStopped = async () => {
-    assertNotAborted(signal);
-    const current = await host.probe();
-    if (current.phase !== "unmanaged" || current.ready || current.ownership !== "none" || current.pid !== null || current.error) {
-      throw runtimeError("Close the running Octopus runtime before recovering its interrupted workspace transactions.", environment);
-    }
-  };
+  const assertStopped = () => assertRuntimeStopped(environment, host,
+    "Close the running Octopus runtime before recovering its interrupted workspace transactions.", signal);
   const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: environment.packageRoots.stateRoot, guard: assertStopped });
   try {
     await recoverLocalPackageTransactions(environment.packageRoots);
