@@ -1032,6 +1032,25 @@
   max-width: 420px;
 }
 
+.welcome-agent .welcome-stage {
+  overflow-y: auto;
+  align-items: safe center;
+}
+
+.welcome-agent .welcome-agent-form {
+  width: min(100%, 380px);
+  display: grid;
+  gap: 16px;
+  padding-block: 16px;
+  text-align: left;
+}
+
+.welcome-agent-form label {
+  display: grid;
+  gap: 6px;
+  font-size: var(--ui-font-14, 14px);
+}
+
 .welcome-lock-actions {
   display: flex;
   align-items: center;

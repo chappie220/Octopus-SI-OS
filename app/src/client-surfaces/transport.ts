@@ -1,10 +1,11 @@
+import { isWebClient } from "../webClient";
 import type { ClientSurfaceDocumentChange, ClientSurfaceDocumentSnapshot } from "./types";
 
 export async function readClientSurfaceDocuments(): Promise<ClientSurfaceDocumentSnapshot> {
   if (window.octopusTransport?.clientSurfaceDocuments) {
     return window.octopusTransport.clientSurfaceDocuments();
   }
-  if (!import.meta.env.DEV) throw new Error("client surface documents require the desktop app or development server");
+  if (!isWebClient()) throw new Error("client surface documents require the desktop app or Agent server");
   const response = await fetch("/__octopus/client-surfaces", { cache: "no-store" });
   if (!response.ok) throw new Error(`client surface read failed: HTTP ${response.status}`);
   return response.json() as Promise<ClientSurfaceDocumentSnapshot>;
@@ -16,7 +17,7 @@ export function subscribeClientSurfaceDocuments(
   if (window.octopusTransport?.onClientSurfaceDocumentsChanged) {
     return window.octopusTransport.onClientSurfaceDocumentsChanged(listener);
   }
-  if (!import.meta.env.DEV) return () => {};
+  if (!isWebClient()) return () => {};
   const source = new EventSource("/__octopus/client-surface-events");
   source.onmessage = (event) => {
     try {

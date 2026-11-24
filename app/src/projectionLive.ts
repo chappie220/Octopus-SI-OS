@@ -1,3 +1,4 @@
+import { isWebClient } from "./webClient";
 import { useSyncExternalStore } from "react";
 import type { OctopusProjectionChange } from "./electron";
 
@@ -33,7 +34,7 @@ function attach(): void {
   const bridge = window.octopusTransport;
   if (bridge?.onProjectionChanged) {
     detachProjectionChange = bridge.onProjectionChanged((change) => bump(change));
-  } else if (import.meta.env.DEV && typeof EventSource === "function") {
+  } else if (isWebClient() && typeof EventSource === "function") {
     eventSource = new EventSource("/__octopus/events");
     eventSource.onmessage = (event) => {
       try {

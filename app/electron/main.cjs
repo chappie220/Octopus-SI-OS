@@ -1,4 +1,10 @@
 const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeTheme, net: electronNet, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences } = require("electron");
+const agentServerAddress = app.commandLine.getSwitchValue("server") || process.env.OCTOPUS_AGENT_SERVER_URL;
+if (agentServerAddress) {
+  require("./agentServerWindow.cjs").startAgentDesktopClient(agentServerAddress);
+  return;
+}
+
 const net = require("node:net");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -5040,6 +5046,7 @@ function setApplicationMenu() {
       label: "File",
       submenu: [
         { label: "New Window", click: () => openNewClientWindowFromMenu() },
+        { label: "Connect to Agent Server…", click: () => require("./agentServerWindow.cjs").showAgentServerConnection() },
         { type: "separator" },
         commandItem("New Task", "new_chat"),
         commandItem("Attach Files…", "attach_files"),

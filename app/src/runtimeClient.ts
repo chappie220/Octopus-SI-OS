@@ -1,3 +1,4 @@
+import { isWebClient } from "./webClient";
 import { DEFAULT_RUNTIME_ENDPOINT } from "./gateway";
 import type { OctopusRuntimeEndpointValidation } from "./electron";
 
@@ -7,7 +8,7 @@ export type ConnectionPrefs = {
 
 const PREFS_KEY = "octopus.runtimeUi.prefs.v1";
 export const RUNTIME_PREFS_CHANGED_EVENT = "octopus:runtime-prefs-changed";
-const DEV_VALIDATE_ENDPOINT_URL = "/__octopus/validate-endpoint";
+const WEB_VALIDATE_ENDPOINT_URL = "/__octopus/validate-endpoint";
 
 export function loadRuntimePrefs(): ConnectionPrefs {
   try {
@@ -38,8 +39,8 @@ export async function validateRuntimeEndpoint(endpoint: string): Promise<Octopus
     if (!result.valid) throw new Error(result.error || "The endpoint is invalid.");
     return result;
   }
-  if (import.meta.env.DEV) {
-    const response = await fetch(DEV_VALIDATE_ENDPOINT_URL, {
+  if (isWebClient()) {
+    const response = await fetch(WEB_VALIDATE_ENDPOINT_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ endpoint }),
@@ -48,7 +49,7 @@ export async function validateRuntimeEndpoint(endpoint: string): Promise<Octopus
     if (!response.ok || !result.valid) throw new Error(result.error || `Endpoint validation failed: ${response.status}`);
     return result;
   }
-  throw new Error("Endpoint validation is unavailable outside the desktop app or development server.");
+  throw new Error("Endpoint validation is unavailable outside the desktop app or Agent server.");
 }
 
 export function displayEndpoint(baseUrl: string): string {

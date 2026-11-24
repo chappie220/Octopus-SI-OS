@@ -1,3 +1,4 @@
+import { isWebClient } from "./webClient";
 import type {
   OctopusAdministratorAccessUpdate,
   OctopusClientAccessDetails,
@@ -21,6 +22,14 @@ export async function configureClientAccess(password: string): Promise<OctopusCl
 export async function unlockClientAccess(password: string): Promise<OctopusClientAccessStatus> {
   if (window.octopusTransport?.unlockAccess) return window.octopusTransport.unlockAccess(password);
   return request("unlock", "POST", { password });
+}
+
+export async function signInAgent(credentials: {
+  username: string;
+  password: string;
+  turnstileToken: string;
+}): Promise<OctopusClientAccessStatus> {
+  return request("unlock", "POST", credentials);
 }
 
 export async function readTouchIdStatus(): Promise<OctopusTouchIdStatus> {
@@ -72,7 +81,7 @@ async function request(
   method: "GET" | "POST",
   body?: Record<string, unknown>,
 ): Promise<OctopusClientAccessStatus> {
-  if (!import.meta.env.DEV) throw new Error("Client access host is unavailable");
+  if (!isWebClient()) throw new Error("Client access host is unavailable");
   const response = await fetch(`${ACCESS_URL}/${operation}`, {
     method,
     credentials: "same-origin",
@@ -90,7 +99,7 @@ async function labRequest(
   method: "GET" | "POST",
   body?: Record<string, unknown>,
 ): Promise<OctopusClientLabAccess> {
-  if (!import.meta.env.DEV) throw new Error("Client access host is unavailable");
+  if (!isWebClient()) throw new Error("Client access host is unavailable");
   const response = await fetch(`${ACCESS_URL}/${operation}`, {
     method,
     credentials: "same-origin",
@@ -108,7 +117,7 @@ async function detailsRequest(
   method: "GET" | "POST",
   body?: OctopusAdministratorAccessUpdate,
 ): Promise<OctopusClientAccessDetails> {
-  if (!import.meta.env.DEV) throw new Error("Client access host is unavailable");
+  if (!isWebClient()) throw new Error("Client access host is unavailable");
   const response = await fetch(`${ACCESS_URL}/${operation}`, {
     method,
     credentials: "same-origin",

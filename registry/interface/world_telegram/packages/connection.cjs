@@ -99,7 +99,7 @@ async function stored(ctx, name) {
   const saved = ctx.values?.[name];
   const ambient = await ctx.launchEnvironment(name);
   if (typeof saved === "string" && typeof ambient === "string" && saved !== ambient) {
-    throw new Problem(`${name} is set in this Mac's environment and saved in Octopus with a different value, so the Telegram interface cannot start. Remove it from the environment or connect with the same value.`);
+    throw new Problem(`${name} is set in the host environment and saved in Octopus with a different value, so the Telegram interface cannot start. Remove it from the environment or connect with the same value.`);
   }
   const value = typeof ambient === "string" ? ambient : typeof saved === "string" ? saved : "";
   return value.trim();
@@ -109,7 +109,7 @@ async function inherited(ctx, name, value, same = (left, right) => left === righ
   const ambient = await ctx.launchEnvironment(name);
   if (typeof ambient !== "string") return false;
   if (value && !same(value, ambient.trim())) {
-    throw new Problem(`${name} is set in this Mac's environment to a different value, and the Telegram interface uses that one. Remove it from the environment or enter the same value.`);
+    throw new Problem(`${name} is set in the host environment to a different value, and the Telegram interface uses that one. Remove it from the environment or enter the same value.`);
   }
   return true;
 }
@@ -724,7 +724,7 @@ async function connect(ctx) {
     const access = await allowed(ctx, names, config, users);
     const pairing = !reachable(access);
     if (pairing && usersInherited) {
-      throw new Problem(`${names.users} is set in this Mac's environment without a user ID, so Octopus cannot save the Telegram account you pair. Remove it from the environment or put your Telegram user ID in it.`);
+      throw new Problem(`${names.users} is set in the host environment without a user ID, so Octopus cannot save the Telegram account you pair. Remove it from the environment or put your Telegram user ID in it.`);
     }
     const path = await route(ctx, config, token);
     ctx.progress({ message: "Checking the bot token with Telegram…" });
@@ -764,10 +764,10 @@ async function disconnect(ctx) {
   return guarded(async () => {
     const names = environmentNames(ctx.descriptor);
     await ctx.saveValues({ [names.token]: null, [names.users]: null, [names.home]: null });
-    const removed = "Telegram is disconnected: Octopus removed the bot token and allowed users from this Mac.";
+    const removed = "Telegram is disconnected: Octopus removed the bot token and allowed users from this Home.";
     const remains = "The bot still exists; revoke its token or delete it in BotFather.";
     if (typeof (await ctx.launchEnvironment(names.token)) !== "string") return { state: "not_connected", manage: MANAGE, message: `${removed} ${remains}` };
-    const listed = `${names.token} is set in this Mac's environment`;
+    const listed = `${names.token} is set in the host environment`;
     const state = await probe(ctx);
     if (state.state === "error") return { ...state, message: `Octopus removed the saved Telegram settings, but ${listed} and checking it failed: ${state.message}` };
     if (state.state === "not_connected") {

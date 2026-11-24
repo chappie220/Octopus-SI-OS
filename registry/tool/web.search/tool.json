@@ -16,7 +16,9 @@
       "BRAVE_SEARCH_API_KEY",
       "SEARXNG_BASE_URL",
       "KEENABLE_BASE_URL",
-      "OCTOPUS_WEB_PROXY"
+      "OCTOPUS_WEB_PROXY",
+      "OCTOPUS_WEB_SEARCH_PROVIDER",
+      "OCTOPUS_PROVIDER_OPENROUTER_API_KEY"
     ],
     "authority": {
       "read_root_slots": [],
@@ -39,6 +41,7 @@
   "handler_config": {
     "operation": "search",
     "default_provider": "custom",
+    "default_provider_env": "OCTOPUS_WEB_SEARCH_PROVIDER",
     "request_timeout_ms": 60000,
     "max_response_bytes": 4000000,
     "proxy_env": "OCTOPUS_WEB_PROXY",
@@ -254,6 +257,58 @@
         },
         "retry": {}
       },
+      "openrouter": {
+        "base_url": "https://openrouter.ai",
+        "path": "/api/v1/chat/completions",
+        "method": "POST",
+        "auth": {
+          "env": "OCTOPUS_PROVIDER_OPENROUTER_API_KEY",
+          "placement": "header",
+          "name": "Authorization",
+          "prefix": "Bearer "
+        },
+        "body": {
+          "static_values": {
+            "model": "openai/gpt-5.2",
+            "max_completion_tokens": 1500,
+            "messages": [
+              {
+                "role": "system",
+                "content": "Use the web search tool to research the supplied query. Cite the pages that answer it."
+              },
+              {
+                "role": "user",
+                "content": ""
+              }
+            ],
+            "tools": [
+              {
+                "type": "openrouter:web_search",
+                "parameters": {"engine": "auto", "max_results": 5, "max_uses": 2, "max_total_results": 10}
+              }
+            ]
+          },
+          "argument_fields": {
+            "query": "messages.1.content",
+            "limit": "tools.0.parameters.max_results",
+            "include_domains": "tools.0.parameters.allowed_domains",
+            "exclude_domains": "tools.0.parameters.excluded_domains"
+          },
+          "nonempty_list_overrides": {
+            "exclude_domains": {
+              "tools.0.parameters.engine": "exa"
+            }
+          }
+        },
+        "response": {
+          "items_path": "choices.0.message.annotations",
+          "title_paths": ["url_citation.title"],
+          "url_paths": ["url_citation.url"],
+          "snippet_paths": ["url_citation.content"]
+        },
+        "max_limit": 10,
+        "retry": {"max_attempts": 1}
+      },
       "keenable": {
         "base_url": "https://api.keenable.ai",
         "base_url_env": "KEENABLE_BASE_URL",
@@ -299,7 +354,7 @@
       },
       "provider": {
         "type": "string",
-        "enum": ["custom", "tavily", "exa", "firecrawl", "brave", "searxng", "keenable"]
+        "enum": ["custom", "tavily", "exa", "firecrawl", "brave", "searxng", "keenable", "openrouter"]
       },
       "include_domains": {
         "type": "array",

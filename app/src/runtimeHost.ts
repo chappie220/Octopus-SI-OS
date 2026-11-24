@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import type { OctopusHomeStorageHealth, OctopusInterfaceFailure, OctopusRuntimeHostState } from "./electron";
+import { isAgentWebClient } from "./webClient";
+import type { OctopusClientAccessProfile, OctopusHomeStorageHealth, OctopusInterfaceFailure, OctopusRuntimeHostState } from "./electron";
 
 export type RuntimeClientState = OctopusRuntimeHostState & {
   available: boolean;
@@ -25,7 +26,7 @@ const EMPTY_STATE: RuntimeClientState = {
   updatedAtMs: 0,
 };
 
-export function useRuntimeHost() {
+export function useRuntimeHost(profile?: OctopusClientAccessProfile | null) {
   const [state, setState] = useState<RuntimeClientState>(EMPTY_STATE);
 
   const applyHostState = useCallback((next: OctopusRuntimeHostState) => {
@@ -60,6 +61,37 @@ export function useRuntimeHost() {
   }, [applyHostState]);
 
   useEffect(() => {
+    if (isAgentWebClient()) {
+      if (profile !== "live") return;
+      const abort = new AbortController();
+      let timer: number;
+      const poll = async () => {
+        try {
+          const response = await fetch("/__octopus/runtime-status", { signal: abort.signal });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Runtime status failed: HTTP ${response.status}`);
+          if (!abort.signal.aborted) setState({
+            ...EMPTY_STATE,
+            available: false,
+            phase: result.phase,
+            ready: result.ready,
+            home: result.home,
+            error: result.error,
+            storageHealth: result.storageHealth,
+            interfaceFailures: result.interfaceFailures,
+          });
+        } catch (error) {
+          if (!abort.signal.aborted) setState((previous) => ({
+            ...previous, available: false, ready: false, phase: "degraded",
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        } finally {
+          if (!abort.signal.aborted) timer = window.setTimeout(() => { void poll(); }, 3_000);
+        }
+      };
+      void poll();
+      return () => { abort.abort(); window.clearTimeout(timer); };
+    }
     const bridge = window.octopusTransport;
     if (!bridge?.bootStatus) {
       setState({ ...EMPTY_STATE, phase: "external_preview", ready: true, available: false });
@@ -68,7 +100,7 @@ export function useRuntimeHost() {
     const unsubscribe = bridge.onRuntimeHostState?.(applyHostState);
     void refreshObservation();
     return () => unsubscribe?.();
-  }, [applyHostState, refreshObservation]);
+  }, [applyHostState, profile, refreshObservation]);
 
   return state;
 }

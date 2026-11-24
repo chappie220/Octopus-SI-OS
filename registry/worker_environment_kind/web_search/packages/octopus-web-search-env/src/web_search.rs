@@ -120,6 +120,8 @@ struct ProviderCatalog {
     #[serde(default)]
     default_provider: Option<String>,
     #[serde(default)]
+    default_provider_env: Option<String>,
+    #[serde(default)]
     request_timeout_ms: Option<u64>,
     #[serde(default)]
     max_response_bytes: Option<usize>,
@@ -174,6 +176,8 @@ struct RequestProjection {
     static_values: Map<String, Value>,
     #[serde(default)]
     argument_fields: BTreeMap<String, String>,
+    #[serde(default)]
+    nonempty_list_overrides: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -389,7 +393,19 @@ fn select_provider<'a>(
                 .ok_or_else(|| "provider must be a non-empty string".to_string())
         })
         .transpose()?;
+    let configured = if requested.is_none() {
+        match catalog.default_provider_env.as_deref().map(std::env::var) {
+            Some(Ok(value)) => Some(value),
+            Some(Err(std::env::VarError::NotUnicode(_))) => {
+                return Err("web tool default provider environment value must be UTF-8".to_string());
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let provider_id = requested
+        .or(configured.as_deref().map(str::trim))
         .or(catalog.default_provider.as_deref().map(str::trim))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "web tool requires an explicit provider".to_string())?;
@@ -722,6 +738,17 @@ fn projected_values(
             set_dotted(&mut values, field, value.clone())?;
         }
     }
+    for (argument, overrides) in &projection.nonempty_list_overrides {
+        if arguments
+            .get(argument)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+        {
+            for (field, value) in overrides {
+                set_dotted(&mut values, field, value.clone())?;
+            }
+        }
+    }
     Ok(values)
 }
 
@@ -731,19 +758,38 @@ fn set_dotted(root: &mut Map<String, Value>, path: &str, value: Value) -> Result
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    let Some((last, parents)) = segments.split_last() else {
+    let Some((first, rest)) = segments.split_first() else {
         return Err("web provider projection path must not be blank".to_string());
     };
-    let mut current = root;
+    let Some((last, parents)) = rest.split_last() else {
+        root.insert((*first).to_string(), value);
+        return Ok(());
+    };
+    let invalid_path = || format!("web provider projection path '{path}' crosses an invalid entry");
+    let mut current = root
+        .entry((*first).to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
     for segment in parents {
-        let entry = current
-            .entry((*segment).to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        current = entry.as_object_mut().ok_or_else(|| {
-            format!("web provider projection path '{path}' crosses a non-object value")
-        })?;
+        current = match current {
+            Value::Object(object) => object
+                .entry((*segment).to_string())
+                .or_insert_with(|| Value::Object(Map::new())),
+            Value::Array(array) => array
+                .get_mut(segment.parse::<usize>().map_err(|_| invalid_path())?)
+                .ok_or_else(&invalid_path)?,
+            _ => return Err(invalid_path()),
+        };
     }
-    current.insert((*last).to_string(), value);
+    match current {
+        Value::Object(object) => {
+            object.insert((*last).to_string(), value);
+        }
+        Value::Array(array) => {
+            let index = last.parse::<usize>().map_err(|_| invalid_path())?;
+            *array.get_mut(index).ok_or_else(invalid_path)? = value;
+        }
+        _ => return Err(invalid_path()),
+    }
     Ok(())
 }
 
@@ -1050,4 +1096,68 @@ fn body_evidence(value: &[u8]) -> String {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod openrouter_tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_projects_a_search_request_and_cited_sources() {
+        let descriptor: Value =
+            serde_json::from_str(include_str!("../../../../../tool/web.search/tool.json")).unwrap();
+        let catalog = parse_catalog(&descriptor["handler_config"], "web.search").unwrap();
+        let args = json!({
+            "provider": "openrouter",
+            "query": "Raspberry Pi 5",
+            "limit": 3,
+            "include_domains": ["raspberrypi.com"],
+            "exclude_domains": ["example.com"]
+        });
+        let args = args.as_object().unwrap();
+        let (id, provider) = select_provider(&catalog, args).unwrap();
+        assert_eq!(id, "openrouter");
+        let body = Value::Object(projected_values(&provider.body, args).unwrap());
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "Raspberry Pi 5");
+        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
+        assert_eq!(body["tools"][0]["parameters"]["max_results"], 3);
+        assert_eq!(body["tools"][0]["parameters"]["engine"], "exa");
+        let mut auto_args = args.clone();
+        auto_args.remove("exclude_domains");
+        let auto_body = Value::Object(projected_values(&provider.body, &auto_args).unwrap());
+        assert_eq!(auto_body["tools"][0]["parameters"]["engine"], "auto");
+        auto_args.insert("exclude_domains".to_string(), json!([]));
+        let empty_filter_body = Value::Object(projected_values(&provider.body, &auto_args).unwrap());
+        assert_eq!(empty_filter_body["tools"][0]["parameters"]["engine"], "auto");
+        assert_eq!(
+            body["tools"][0]["parameters"]["allowed_domains"],
+            json!(["raspberrypi.com"])
+        );
+        assert_eq!(
+            body["tools"][0]["parameters"]["excluded_domains"],
+            json!(["example.com"])
+        );
+
+        let response = json!({"choices": [{"message": {"annotations": [{
+            "type": "url_citation",
+            "url_citation": {
+                "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+                "title": "Raspberry Pi 5",
+                "content": "A 64-bit computer"
+            }
+        }]}}]});
+        let items = response_items(&response, provider.response.items_path.as_deref()).unwrap();
+        assert_eq!(
+            search_candidate(&provider.response, items[0]).unwrap(),
+            json!({
+                "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+                "title": "Raspberry Pi 5",
+                "snippet": "A 64-bit computer"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
+    }
 }

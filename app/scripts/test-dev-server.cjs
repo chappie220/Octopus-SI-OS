@@ -10,6 +10,8 @@ const { buildSync } = require("esbuild");
 const appRoot = path.resolve(__dirname, "..");
 const configFile = path.join(appRoot, "vite.config.ts");
 const realRequire = createRequire(configFile);
+const apiFile = path.join(appRoot, "electron", "clientHttpApi.cjs");
+const apiRequire = createRequire(apiFile);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "octopus-dev-server-"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 const home = path.join(root, "home");
@@ -51,10 +53,20 @@ function loadDevServer() {
     } }),
     "./electron/contentAddressedArtifact.cjs": (real) => ({ ...real, readContentAddressedArtifactPayload: async (input) => { world.events.push(["read-payload", input]); return {}; } }),
   };
-  const devRequire = Object.assign((id) => {
-    world.required.push(id);
-    return electronModules[id] ? electronModules[id](realRequire(id)) : realRequire(id);
-  }, { resolve: realRequire.resolve, cache: {} });
+  function devRequire(id) {
+    if (id !== "./electron/clientHttpApi.cjs") return realRequire(id);
+    const module = { exports: {} };
+    const requireApi = Object.assign((specifier) => {
+      world.required.push(specifier);
+      const replace = electronModules[specifier.replace(/^\.\//, "./electron/")];
+      const value = apiRequire(specifier);
+      return replace ? replace(value) : value;
+    }, { resolve: apiRequire.resolve, cache: {} });
+    Function("require", "module", "exports", "__dirname", fs.readFileSync(apiFile, "utf8"))(
+      requireApi, module, module.exports, path.dirname(apiFile),
+    );
+    return module.exports;
+  }
   const externals = {
     vite: { defineConfig: (config) => config },
     "@vitejs/plugin-react": () => ({ name: "react" }),

@@ -7,6 +7,7 @@ Octopus interfaces under policy.
 
 - [Build and first setup](../docs/getting-started.md)
 - [Using the desktop client](../docs/client.md)
+- [Agent server and WebUI](../docs/agent-server.md)
 - [Architecture](../docs/architecture.md)
 - [Development and checks](../docs/development.md)
 

@@ -8,6 +8,10 @@
   Drivers, Extensions, and where packages come from.
 - [Terminal client](cli.md) - interactive chat, shared tasks, setup, and commands
   for scripts and other agents.
+- [Agent server and WebUI](agent-server.md) - run Octopus on a server and
+  connect from the browser or desktop.
+- [Raspberry Pi 5](raspberry-pi.md) - ARM64 deployment with OpenRouter chat,
+  web search, and a Telegram bot.
 - [Process isolation on Linux](linux.md) - headless Linux runtime confinement
   with AppArmor, systemd, and cgroup v2.
 - [Troubleshooting](../TROUBLESHOOTING.md) - where to look when something
