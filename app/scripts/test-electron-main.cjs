@@ -93,7 +93,7 @@ function fakeElectron(world) {
   const app = new EventEmitter();
   const paths = { appData: path.join(world.root, "app-data") };
   Object.assign(app, {
-    commandLine: { appendSwitch: () => {} },
+    commandLine: { appendSwitch: () => {}, getSwitchValue: () => "" },
     dock: { setIcon: () => {} },
     isPackaged: false,
     getAppPath: () => path.join(world.root, "app"),
