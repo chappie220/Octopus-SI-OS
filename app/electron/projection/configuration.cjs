@@ -24,6 +24,7 @@ function configurationProjection(store) {
   let applicationCatalogGeneration = 1;
   let applicationOwnerScope = null;
   let applicationOwners = null;
+  const runRecordCache = new Map();
   const packageProjectionStates = new WeakMap();
 
   async function cachedPackageCatalog(repoRoot) {
@@ -65,7 +66,12 @@ function configurationProjection(store) {
     if (filename === null || filename === undefined) return true;
     const segments = String(filename).split(/[\\/]/).filter(Boolean);
     if (!segments.length) return true;
-    if (segments[0] === "client" && segments[1] === "package-state") return true;
+    if (segments[0] === "client" && segments[1] === "package-state") {
+      if (segments.length === 3 && ["maintenance-lock.sqlite", "maintenance-lock.sqlite-journal", "maintenance-lock.sqlite-wal", "maintenance-lock.sqlite-shm"].includes(segments[2])) {
+        return false;
+      }
+      return true;
+    }
     if (segments[0] !== "registry") return false;
     if (segments.length < 3 || !packageOwners
       || packageOwnerScope !== store.fileProjectionScope(store.resolveRepoRoot())
@@ -355,7 +361,7 @@ function configurationProjection(store) {
   async function buildFileProjection(repoRoot) {
     const configuration = await cachedConfigurationProjection(repoRoot);
     const warnings = [...configuration.warnings];
-    const runRecordProjection = await readRunRecords(configuration.runRecordsRoot, warnings);
+    const runRecordProjection = await readRunRecords(configuration.runRecordsRoot, warnings, runRecordCache);
     let workspaceSetup;
     try {
       workspaceSetup = await (store.options.inspectWorkspaceSetupState ?? inspectWorkspaceSetupState)({ octopusHomeRoot: configuration.octopusHome, registryRoot: configuration.registryRoot });
@@ -438,6 +444,7 @@ function configurationProjection(store) {
     applicationCatalogBuild = null;
     applicationOwners = null;
     applicationOwnerScope = null;
+    runRecordCache.clear();
   }
 
   return { buildConfigurationProjection, buildFileProjection, cachedConfigurationProjection, cachedEePolicyProjection, closeConfigurationProjection, invalidateConfigurationProjection, withFileProjectionPackages };

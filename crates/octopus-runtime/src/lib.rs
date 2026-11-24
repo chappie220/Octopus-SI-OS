@@ -2099,6 +2099,28 @@ impl Runtime {
                 ),
             });
         }
+        if active_checkpoints.iter().any(|active| {
+            active
+                .interface_binding
+                .iter()
+                .chain(active.outbound_interface_bindings.iter())
+                .any(|binding| binding.interface == *interface && binding.admits(artifact_name))
+                && active
+                    .required_verified_artifacts
+                    .iter()
+                    .any(|required| required.artifact_label == artifact_name)
+        }) {
+            return Err(RuntimeError::DescriptorDrift {
+                reason: RefusedReason::Policy,
+                detail: format!(
+                    "policy.verification_required: run '{}' checkpoint '{}' cannot emit '{}' to interface '{}' without satisfying required verification",
+                    emitter.run.as_str(),
+                    emitter.checkpoint.as_str(),
+                    artifact_name,
+                    interface.as_str()
+                ),
+            });
+        }
         let resolved_grant = self.resolve_run_record_checkpoint_grant(&record, checkpoint)?;
         ensure_interface_in_grant(
             resolved_grant.grant.as_ref(),
@@ -2152,20 +2174,31 @@ impl Runtime {
         delivery_scope_seq: Option<u64>,
         pending: Option<&Movement>,
     ) -> Result<PreparedInterfaceCheckpointAdmission, RuntimeError> {
-        let registry_generation = self.inner.registry_generation.load(Ordering::Acquire);
         let admitted_checkpoint = self.admit_run_record_artifact_arrival(&mut inv)?;
         let mut commit_inv = inv.clone();
+        let admitted_grant = admitted_checkpoint.grant.clone();
         let admitted_artifact_bindings = admitted_checkpoint.artifact_bindings.clone();
         let required_verified_artifacts = admitted_checkpoint.required_verified_artifacts.clone();
         let inbound_interface_binding = admitted_checkpoint.inbound_binding.clone();
         let outbound_interface_bindings = admitted_checkpoint.outbound_bindings.clone();
         self.require_known_interface(&inv.interface)?;
-        self.require_known_interface_bindings(
-            &outbound_interface_bindings
-                .iter()
-                .map(|binding| binding.interface.clone())
-                .collect::<Vec<_>>(),
-        )?;
+        let outbound_interfaces = outbound_interface_bindings
+            .iter()
+            .map(|binding| binding.interface.clone())
+            .collect::<Vec<_>>();
+        self.require_known_interface_bindings(&outbound_interfaces)?;
+        let verified_interface_classes: BTreeMap<InterfaceId, InterfaceClass> =
+            std::iter::once(inv.interface.clone())
+                .chain(outbound_interfaces)
+                .map(|interface| {
+                    let class = self
+                        .inner
+                        .interface_catalog
+                        .interface_class(&interface)
+                        .ok_or_else(|| RuntimeError::UnknownInterface(interface.clone()))?;
+                    Ok((interface, class))
+                })
+                .collect::<Result<_, RuntimeError>>()?;
         let spent_run = inv.run.clone();
         let spent_checkpoint = inv.checkpoint.clone().ok_or_else(|| {
             RuntimeError::InterfaceBoundaryFailed(format!(
@@ -2238,7 +2271,11 @@ impl Runtime {
         let metadata = &observation.invocation_metadata;
         let runtime = metadata.runtime.as_ref()
             .ok_or_else(|| admission_sources_changed("prepared admission lost its runtime coordinates"))?;
+        let interface_classes_unchanged = verified_interface_classes.iter().all(|(interface, class)| {
+            self.inner.interface_catalog.interface_class(interface) == Some(*class)
+        });
         if current.ee != runtime.ee || current.worker != runtime.worker
+            || current.grant != admitted_grant
             || current.metadata_projection != metadata.grant
             || current.artifact_bindings != metadata.artifact_binding_refs
             || current.required_verified_artifacts != metadata.required_verified_artifacts
@@ -2246,7 +2283,7 @@ impl Runtime {
                 inbound: current.inbound_binding,
                 outbound: current.outbound_bindings,
             })
-            || self.inner.registry_generation.load(Ordering::Acquire) != registry_generation
+            || !interface_classes_unchanged
         {
             return Err(admission_sources_changed("the verified checkpoint, bindings or current grant changed"));
         }
@@ -4258,5 +4295,85 @@ mod tests {
             RefusedReason::NoBinding,
             "the settled run admits no artifact on the resolver path either: empty targets refuse fail-closed, got {err:?}"
         );
+    }
+
+    #[test]
+    fn system_interface_emission_refuses_when_active_checkpoint_requires_verification() {
+        let services = RuntimeServices {
+            interface_catalog: Arc::new(RuntimeInterfaceCatalog::from_classes([
+                (
+                    InterfaceId::new("world_test"),
+                    InterfaceClass::new(
+                        InterfaceType::World,
+                        InterfaceRuntimeDisposition::ExternalReader,
+                    )
+                    .expect("world test interface class forms"),
+                ),
+                (
+                    InterfaceId::new("system_target"),
+                    InterfaceClass::new(
+                        InterfaceType::System,
+                        InterfaceRuntimeDisposition::ExternalReader,
+                    )
+                    .expect("system target interface class forms"),
+                ),
+            ])),
+        };
+        let runtime = Runtime::open(services).unwrap();
+        runtime.set_run_grant_resolver(Arc::new(TestRunAuthorityResolver {
+            gate: runtime.inner.gate.clone(),
+        }));
+        let dir = temp_test_dir("emission-requires-verification");
+        runtime.set_run_records_dir(dir.clone());
+        let grant = grant_with_interfaces(&["world_test", "system_target"], &["mark.allowed"]);
+        runtime.set_run_authority(RunId::new("r1"), grant.clone(), GrantEpoch(0));
+        let record_path = literal_boundary_run_record_fixture_at_checkpoint_with_outbound(
+            &dir,
+            &RunId::new("r1"),
+            &InterfaceId::new("world_test"),
+            &CheckpointId::new("c1"),
+            &grant,
+            &[InterfaceId::new("system_target")],
+        );
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("run record reads"))
+                .expect("run record parses");
+        record["checkpoints"][0]["required_verified_artifacts"] = serde_json::json!([
+            {
+                "mark": "mark.allowed",
+                "artifact_label": "verified.payload",
+                "verifier": "verifier_allowed",
+                "params": {}
+            }
+        ]);
+        write_literal_run_record_fixture(&record_path, &record).expect("run record writes");
+
+        let emitter = SystemInterfaceEmitter {
+            run: &RunId::new("r1"),
+            checkpoint: &CheckpointId::new("c1"),
+            epoch: GrantEpoch(0),
+        };
+        let err = runtime
+            .resolve_system_interface_emission_grant(
+                emitter,
+                &InterfaceId::new("world_test"),
+                &InterfaceId::new("system_target"),
+                "verified.payload",
+            )
+            .expect_err("emission matching a verified checkpoint must fail closed");
+        assert_eq!(err.refused_reason(), RefusedReason::Policy);
+        assert!(
+            err.to_string().contains("policy.verification_required"),
+            "expected policy.verification_required, got {err}"
+        );
+
+        runtime
+            .resolve_system_interface_emission_grant(
+                emitter,
+                &InterfaceId::new("world_test"),
+                &InterfaceId::new("system_target"),
+                "unverified.payload",
+            )
+            .expect("emission for an unverified artifact label remains permitted");
     }
 }

@@ -84,10 +84,6 @@
       "artifact.list",
       "artifact.read",
       "artifact.search",
-      "skill.list",
-      "skill.get",
-      "skill.search",
-      "skill.capture",
       "artifact.send",
       "file.write",
       "code_mode.run",
@@ -162,6 +158,7 @@
     "mark_outcomes": [
       "ocr.text.contains",
       "tool.call.allowed",
+      "operation.call.allowed",
       "tool.result.corresponds",
       "task.summary.received",
       "operator.approval",

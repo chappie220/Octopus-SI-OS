@@ -39,10 +39,12 @@ async function assertPackMembers() {
     "interface/world_operator_chat",
     "mark/memory.capture.completed",
     "mark/memory.experience.admitted",
+    "mark/operation.call.allowed",
     "mark/tool.call.allowed",
     "mark/tool.result.corresponds",
     "verifier/memory_capture_outcome",
     "verifier/memory_experience",
+    "verifier/operation_call_allowed",
     "verifier/operator_approval",
     "verifier/operator_input",
     "verifier/tool_call_allowed",
@@ -458,7 +460,9 @@ async function run(preparedExecutable) {
       ["interface", "world_provider_codex"],
       ["worker_environment_kind", "system_room"],
       ["tool", "file.write"],
+      ["mark", "operation.call.allowed"],
       ["mark", "tool.call.allowed"],
+      ["verifier", "operation_call_allowed"],
       ["verifier", "tool_call_allowed"],
       ["artifact", "artifact-worker-role-template"],
       ["artifact", "artifact-grounding-system-architecture"],
@@ -482,7 +486,8 @@ async function boundedAgentPresetFixture(executable) {
   const root = await fs.realpath(await fs.mkdtemp("/private/tmp/octopus-cu-preset-"));
   const home = path.join(root, "home");
   const active = path.join(home, "registry");
-  const roots = { publication: require("./support/native-publication.cjs").nativePublication(executable), sourceRegistryRoot, activeRegistryRoot: active, libraryRoot, stateRoot: path.join(home, "client", "package-state") };
+  const { nativePublication, resolveNativePublicationTimeoutMs } = require("./support/native-publication.cjs");
+  const roots = { publication: nativePublication(executable), sourceRegistryRoot, activeRegistryRoot: active, libraryRoot, stateRoot: path.join(home, "client", "package-state") };
   const originalSpawn = childProcess.spawn;
   try {
     const catalog = await readLocalPackageCatalog(roots);
@@ -515,7 +520,7 @@ async function boundedAgentPresetFixture(executable) {
     childProcess.spawn = (command, args, options) => {
       assert.equal(command, binary);
       plannerCalls += 1;
-      const child = originalSpawn(command, args, { ...options, timeout: 30000, env: { PATH: process.env.PATH, OCTOPUS_HOME: home, TMPDIR: root } });
+      const child = originalSpawn(command, args, { ...options, timeout: resolveNativePublicationTimeoutMs(), env: { PATH: process.env.PATH, OCTOPUS_HOME: home, TMPDIR: root } });
       let outputBytes = 0;
       for (const stream of [child.stdout, child.stderr]) stream.on("data", (chunk) => { outputBytes += chunk.length; if (outputBytes > 16 * 1024 * 1024) child.kill("SIGKILL"); });
       return child;

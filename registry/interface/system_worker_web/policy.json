@@ -85,10 +85,6 @@
       "artifact.list",
       "artifact.read",
       "artifact.search",
-      "skill.list",
-      "skill.get",
-      "skill.search",
-      "skill.capture",
       "artifact.send",
       "file.write",
       "browser.viewport_set",
@@ -124,6 +120,7 @@
     ],
     "mark_outcomes": [
       "tool.call.allowed",
+      "operation.call.allowed",
       "tool.result.corresponds",
       "task.summary.received",
       "operator.approval",
