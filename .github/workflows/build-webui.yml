@@ -1,0 +1,22 @@
+name: build-webui
+on:
+  workflow_dispatch:
+jobs:
+  webui:
+    name: WebUI (vite build)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix app
+      - run: npm --prefix app run build
+      - name: Verify WebUI output
+        run: test -f app/dist/index.html && ls app/dist | head
+      - uses: actions/upload-artifact@v4
+        with:
+          name: octopus-webui
+          path: app/dist
+          compression-level: 0
+          retention-days: 7
