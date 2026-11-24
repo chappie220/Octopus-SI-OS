@@ -19,6 +19,8 @@ npm --prefix app run build
 Use the release process-authority binary from
 `app/build/cli/runtime/bin/octopus-linux-process-authority` with the installer
 in the Linux guide. Make sure AppArmor is active on the running kernel.
+If the parser rejects the fine-grained Unix socket rule, follow the
+[kernel compatibility setup](linux.md#kernels-with-coarse-unix-socket-mediation).
 
 In the selected Home's `.env` file, set the following variables. Give the
 file mode `0600`. Replace the placeholders with your OpenRouter key, BotFather

@@ -1,6 +1,6 @@
 use crate::peer::{ensure_alive, with_stopped_peer, Peer};
 use octopus_verifiers::process_authority::linux::{
-    LinuxProcessPolicy, CONTROL_SOCKET, MAX_REQUEST_BYTES,
+    LinuxProcessPolicy, UnixSocketMediation, CONTROL_SOCKET, MAX_REQUEST_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,6 +38,7 @@ struct Lease {
 struct Host {
     cgroup: PathBuf,
     leases: Mutex<BTreeMap<String, Lease>>,
+    unix_mediation: UnixSocketMediation,
 }
 
 pub fn serve() -> Result<(), String> {
@@ -53,6 +54,14 @@ pub fn serve() -> Result<(), String> {
     {
         return Err("AppArmor is not enabled".into());
     }
+    let unix_mediation = match std::env::var("OCTOPUS_APPARMOR_UNIX_COMPAT") {
+        Err(std::env::VarError::NotPresent) => UnixSocketMediation::FineGrained,
+        Ok(value) if value == "1" => {
+            eprintln!("AppArmor Unix compatibility enabled: abstract stream sockets are not isolated by address");
+            UnixSocketMediation::FamilyAndType
+        }
+        _ => return Err("OCTOPUS_APPARMOR_UNIX_COMPAT must be unset or 1".into()),
+    };
     secure_file(Path::new(PARSER), false)?;
     secure_directory(Path::new("/run/octopus-process-authority"))?;
     let _ownership = service_lock()?;
@@ -67,6 +76,7 @@ pub fn serve() -> Result<(), String> {
     let host = Arc::new(Host {
         cgroup,
         leases: Mutex::new(BTreeMap::new()),
+        unix_mediation,
     });
     host.recover()?;
     match fs::symlink_metadata(CONTROL_SOCKET) {
@@ -196,7 +206,7 @@ impl Host {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let profile = format!("octopus-{}-{token}", peer.uid);
-        let text = policy.apparmor_profile(&profile, peer.uid)?;
+        let text = policy.apparmor_profile(&profile, peer.uid, self.unix_mediation)?;
         let record = Record {
             uid: peer.uid,
             parent: peer.pid,
@@ -219,7 +229,7 @@ impl Host {
             )?;
             fs::rename(&preparing, &directory).map_err(display)?;
             fs::create_dir(self.cgroup.join(&profile)).map_err(display)?;
-            parser("--add", &directory.join("policy"))?;
+            load_profile(&directory, &profile, self.unix_mediation)?;
             if !profile_loaded(&profile)? {
                 return Err("AppArmor did not enforce the loaded profile".into());
             }
@@ -390,7 +400,7 @@ impl Host {
         }
         let directory = Path::new(STATE).join(&record.profile);
         if profile_loaded(&record.profile)? {
-            parser("--remove", &directory.join("policy"))?;
+            remove_profile(&record.profile)?;
         }
         if cgroup.exists() {
             fs::remove_dir(&cgroup).map_err(display)?;
@@ -483,26 +493,86 @@ fn own_cgroup() -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn parser(operation: &str, policy: &Path) -> Result<(), String> {
-    secure_file(policy, true)?;
-    let output = Command::new(PARSER)
+fn parser_command() -> Command {
+    let mut parser = Command::new(PARSER);
+    parser
         .env_clear()
+        .env("LC_ALL", "C")
         .args([
             "--config-file=/dev/null",
             "--skip-cache",
             "--warn=all",
-            "--Werror",
             "--jobs=1",
-            operation,
         ])
-        .arg(policy)
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::null());
+    parser
+}
+
+fn load_profile(
+    directory: &Path,
+    profile: &str,
+    unix_mediation: UnixSocketMediation,
+) -> Result<(), String> {
+    let policy = directory.join("policy");
+    secure_file(&policy, true)?;
+    let mut parser = parser_command();
+    if unix_mediation == UnixSocketMediation::FamilyAndType {
+        let output = parser
+            .arg("--stdout")
+            .arg(&policy)
+            .output()
+            .map_err(display)?;
+        let warning = format!(
+            "Warning from profile {profile} ({}): downgrading extended network unix socket rule to generic network rule",
+            policy.display()
+        );
+        check_parser_output("compile", &output, Some(&warning))?;
+        if output.stdout.is_empty() {
+            return Err("AppArmor produced no compiled policy".into());
+        }
+        let compiled = directory.join("policy.bin");
+        write_new(&compiled, &output.stdout)?;
+        parser = parser_command();
+        parser.arg("--binary").arg("--add").arg(&compiled);
+    } else {
+        parser.arg("--add").arg(&policy);
+    }
+    let output = parser.arg("--Werror").output().map_err(display)?;
+    check_parser_output("--add", &output, None)
+}
+
+fn remove_profile(profile: &str) -> Result<(), String> {
+    let mut parser = parser_command()
+        .args(["--Werror", "--remove"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(display)?;
-    if !output.status.success() {
+    let input = parser
+        .stdin
+        .take()
+        .ok_or("AppArmor removal input is unavailable")?
+        .write_all(format!("abi <abi/4.0>,\nprofile {profile} {{}}\n").as_bytes());
+    let output = parser.wait_with_output().map_err(display)?;
+    check_parser_output("--remove", &output, None)?;
+    input.map_err(display)
+}
+
+fn check_parser_output(
+    operation: &str,
+    output: &std::process::Output,
+    allowed_warning: Option<&str>,
+) -> Result<(), String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let diagnostic = stderr.trim();
+    let unexpected_diagnostic = diagnostic
+        .lines()
+        .any(|line| !line.is_empty() && Some(line) != allowed_warning);
+    if !output.status.success() || unexpected_diagnostic {
         return Err(format!(
-            "AppArmor {operation} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "AppArmor {operation} failed ({}): {diagnostic}",
+            output.status
         ));
     }
     Ok(())
@@ -605,7 +675,28 @@ fn display(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::enforced_profile_name;
+    use super::{check_parser_output, enforced_profile_name};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    #[test]
+    fn compatibility_accepts_only_the_expected_parser_warning() {
+        let warning = "Warning from profile test (/tmp/policy): downgrading extended network unix socket rule to generic network rule";
+        let mut output = Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: format!("{warning}\n\n{warning}\n\n").into_bytes(),
+        };
+        assert!(check_parser_output("compile", &output, Some(warning)).is_ok());
+        assert!(check_parser_output("compile", &output, None).is_err());
+        output
+            .stderr
+            .extend_from_slice(b"Warning: unexpected downgrade\n");
+        assert!(check_parser_output("compile", &output, Some(warning)).is_err());
+        output.stderr = warning.as_bytes().to_vec();
+        output.status = ExitStatus::from_raw(1 << 8);
+        assert!(check_parser_output("compile", &output, Some(warning)).is_err());
+    }
 
     #[test]
     fn accepts_plain_and_unconfined_stacked_enforced_labels() {
