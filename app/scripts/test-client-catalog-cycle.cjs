@@ -44,7 +44,7 @@ window.octopusTransport = {
   onProjectionChanged: (listener) => { projectionChanged = listener; return () => { projectionChanged = null; }; },
   onChatgptAccountChanged: (listener) => { accountChanged = listener; return () => { accountChanged = null; }; },
 };
-const live = load("projectionLive.ts");
+const live = load("projectionLive.ts", { "./webClient": load("webClient.ts") });
 const { useChatCapabilityCatalog } = load("components/chat/useChatCapabilityCatalog.ts", {
   "../../shell/latestProjectionRead": load("shell/latestProjectionRead.ts"),
   "../../chatRuns": { formatProjectionError: String, loadChatExecutionContexts: () => deferred(contextReads), loadChatWorkerEnvironmentRooms: async () => [] },
