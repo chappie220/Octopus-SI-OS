@@ -31,7 +31,7 @@ async function collectSupportReport({ application, profile, clientRoot, home, ru
   if (profile !== "live") return report;
   if (home && runtime?.home !== home) runtime = null;
   report.runtime = runtime ? {
-    phase: ["probing", "ready", "unmanaged", "degraded", "registry_install", "registry_ready", "state_ready", "starting_runtime", "stopping", "access_required"].includes(runtime.phase) ? runtime.phase : "unknown",
+    phase: ["probing", "ready", "unmanaged", "degraded", "registry_install", "registry_ready", "state_ready", "restoring_runtime", "starting_interfaces", "starting_runtime", "stopping", "access_required"].includes(runtime.phase) ? runtime.phase : "unknown",
     ready: runtime.ready === true,
     observed_at: Number.isFinite(runtime.updatedAtMs) ? new Date(runtime.updatedAtMs).toISOString() : null,
     ...(includeDetails && runtime.error ? { error: String(runtime.error).slice(0, 8000) } : {}),

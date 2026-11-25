@@ -525,6 +525,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
         return Ok(());
     }
 
+    runtime_instance.set_phase("restoring_runtime")?;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
@@ -604,6 +605,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
                 };
             }
 
+            runtime_instance.set_phase("starting_interfaces")?;
             boot.stage("interfaces", "discovering descriptor-owned life processes");
             let mut report_interface_boot = |event| match event {
                 InterfaceBootEvent::Discovered { total } => {

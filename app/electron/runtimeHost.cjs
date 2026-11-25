@@ -361,6 +361,7 @@ function normalizeRuntimePhase(phase) {
   if (value === "installing_registry") return "registry_install";
   if (value === "registry_ready") return "registry_ready";
   if (value === "state_ready") return "state_ready";
+  if (value === "restoring_runtime" || value === "starting_interfaces") return value;
   return "starting_runtime";
 }
 

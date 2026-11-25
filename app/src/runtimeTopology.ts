@@ -354,6 +354,8 @@ function liveProjectionStatus(payload: RuntimePayload): ProjectionStatus {
       registry_install: "Installing capabilities",
       registry_ready: "Registry ready",
       state_ready: "Runtime state ready",
+      restoring_runtime: "Restoring runtime from the ledger",
+      starting_interfaces: "Starting interfaces",
       waiting_interfaces: "Starting interfaces",
     };
     return {
