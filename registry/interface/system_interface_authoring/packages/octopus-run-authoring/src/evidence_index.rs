@@ -375,7 +375,6 @@ impl ProviderLedgerEvidenceIndex {
             }
             return Ok(());
         };
-        let artifact_key = artifact_ref_key(artifact);
         if let MovementKind::MarkOutcomeAdmitted(mark) = &movement.kind {
             if let Some(run) = self.related_mark_run(movement, artifact) {
                 self.note_admitted_mark(movement, artifact, mark, &run);
@@ -385,6 +384,7 @@ impl ProviderLedgerEvidenceIndex {
         if !self.owns_interface_movement(movement) {
             return Ok(());
         }
+        let artifact_key = artifact_ref_key(artifact);
         let metadata = movement
             .invocation_metadata
             .as_ref()

@@ -9,6 +9,9 @@ on:
       - 'Cargo.lock'
       - 'crates/octopus-app/**'
       - 'crates/octopus-ledger*/**'
+      - 'crates/octopus-verifiers/src/linux_process.rs'
+      - 'crates/octopus-verifiers/src/process_authority.rs'
+      - 'registry/interface/system_interface_authoring/packages/octopus-run-authoring/**'
   workflow_dispatch: {}
 
 permissions:
@@ -51,3 +54,13 @@ jobs:
           );
           JS
           python3 app/scripts/test-large-ledger-startup.py --runtime-root "$runtime"
+      - name: Exercise provider ledger fallback on ARM64
+        run: >-
+          cargo test --locked --release -p octopus-run-authoring --lib
+          ledger_rows::tests::row_index_retains_outbound_evidence_across_a_refusal_heavy_prefix
+          -- --exact
+      - name: Exercise Linux child launch diagnostics on ARM64
+        run: >-
+          cargo test --locked --release -p octopus-verifiers --lib
+          linux_process::tests::spawn_diagnostics_distinguish_setup_failure_from_exec_failure
+          -- --exact

@@ -2537,7 +2537,8 @@ impl ToolProcessClient {
         }
         let executable = prepared.executable.clone();
         let sandbox_profile = prepared.sandbox_profile.clone();
-        let mut command = tokio::process::Command::from(prepared.command());
+        let (command, describe_spawn_error) = prepared.command_with_spawn_diagnostics();
+        let mut command = tokio::process::Command::from(command);
         #[cfg(unix)]
         command.process_group(0);
         configure_tool_process_owner_lease(&mut command, &owner_lease);
@@ -2563,10 +2564,12 @@ impl ToolProcessClient {
         }
         let mut child = command.spawn().map_err(|error| {
             ToolProcessInvokeError::Unavailable(format!(
-                "tool process '{}' failed to spawn: {error}",
-                executable.display()
+                "tool process '{}' failed to spawn: {}",
+                executable.display(),
+                describe_spawn_error(error)
             ))
         })?;
+        drop(command);
         let process_id = child.id().ok_or_else(|| {
             let _ = child.start_kill();
             ToolProcessInvokeError::Unavailable(format!(

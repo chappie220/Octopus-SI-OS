@@ -10,6 +10,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn row_index_retains_outbound_evidence_across_a_refusal_heavy_prefix() {
+        const ROWS: u64 = 896_035;
+        let ledger = LedgerRows::detached(Path::new("movements.jsonl"));
+        let file = LedgerFile { device: 1, inode: 1 };
+        let digest = ContentHash::of_bytes(b"row");
+        let outbound = OutboundRow {
+            from: Endpoint::Interface("source".into()),
+            to: Endpoint::Interface("target".into()),
+            artifact: None,
+            runtime: None,
+            invocation: false,
+        };
+        for seq in 0..ROWS {
+            ledger.note(file, seq, LedgerRow {
+                start: seq * 4,
+                end: (seq + 1) * 4,
+                digest,
+                outbound: (seq == 2 || seq == ROWS - 1).then(|| outbound.clone()),
+            }).unwrap();
+        }
+        assert_eq!(ledger.known(file).unwrap(), ROWS);
+        assert_eq!(ledger.outbound_matching(file, ROWS, |_| true).unwrap(), [2, ROWS - 1]);
+        assert_eq!(ledger.outbound_matching(file, ROWS - 1, |_| true).unwrap(), [2]);
+        let last = ledger.row(file, ROWS - 1).unwrap().unwrap();
+        assert_eq!((last.start, last.end, last.digest), ((ROWS - 1) * 4, ROWS * 4, digest));
+
+        let replacement = ContentHash::of_bytes(b"replace");
+        ledger.note(file, ROWS - 2, LedgerRow {
+            start: (ROWS - 2) * 4,
+            end: ROWS * 4,
+            digest: replacement,
+            outbound: None,
+        }).unwrap();
+        assert_eq!(ledger.known(file).unwrap(), ROWS - 1);
+        assert_eq!(ledger.outbound_matching(file, ROWS, |_| true).unwrap(), [2]);
+        assert!(ledger.row(file, ROWS - 1).unwrap().is_none());
+        assert_eq!(ledger.row(file, ROWS - 2).unwrap().unwrap().digest, replacement);
+    }
+
+    #[test]
     fn cold_provider_index_materializes_only_its_own_grants() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("movements.jsonl");
@@ -120,7 +160,22 @@ impl OutboundRow {
 #[derive(Default)]
 struct RowState {
     file: Option<LedgerFile>,
-    rows: Vec<LedgerRow>,
+    boundaries: Vec<RowBoundary>,
+    outbounds: BTreeMap<u64, OutboundRow>,
+}
+
+struct RowBoundary {
+    end: u64,
+    digest: ContentHash,
+}
+
+impl RowState {
+    fn start(&self, index: usize) -> Option<u64> {
+        match index.checked_sub(1) {
+            None => Some(0),
+            Some(previous) => self.boundaries.get(previous).map(|row| row.end),
+        }
+    }
 }
 
 type Grants = (HashMap<ContentHash, (BlobFingerprint, Arc<octopus_ledger::GrantProjection>)>, std::collections::VecDeque<ContentHash>);
@@ -199,34 +254,46 @@ impl LedgerRows {
     pub(crate) fn row(&self, file: LedgerFile, seq: u64) -> Result<Option<LedgerRow>, String> {
         let state = self.state()?;
         if state.file != Some(file) { return Ok(None); }
-        Ok(usize::try_from(seq).ok().and_then(|index| state.rows.get(index)).cloned())
+        let Ok(index) = usize::try_from(seq) else { return Ok(None); };
+        let Some(boundary) = state.boundaries.get(index) else { return Ok(None); };
+        let start = state.start(index).ok_or("ledger row lost its preceding boundary")?;
+        Ok(Some(LedgerRow {
+            start,
+            end: boundary.end,
+            digest: boundary.digest,
+            outbound: state.outbounds.get(&seq).cloned(),
+        }))
     }
 
     pub(crate) fn known(&self, file: LedgerFile) -> Result<u64, String> {
         let state = self.state()?;
-        Ok(if state.file == Some(file) { state.rows.len() as u64 } else { 0 })
+        Ok(if state.file == Some(file) { state.boundaries.len() as u64 } else { 0 })
     }
 
     pub(crate) fn forget(&self) -> Result<(), String> {
-        let mut state = self.state()?;
-        state.file = None;
-        state.rows.clear();
+        *self.state()? = RowState::default();
         Ok(())
     }
 
     pub(crate) fn note(&self, file: LedgerFile, seq: u64, row: LedgerRow) -> Result<(), String> {
         let mut state = self.state()?;
         if state.file != Some(file) {
-            state.file = Some(file);
-            state.rows.clear();
+            *state = RowState { file: Some(file), ..RowState::default() };
         }
         let index = usize::try_from(seq).map_err(|_| "ledger row index sequence overflow".to_string())?;
-        if let Some(known) = state.rows.get(index) {
-            if known.start == row.start && known.end == row.end && known.digest == row.digest { return Ok(()); }
-            state.rows.truncate(index);
+        let start = state.start(index);
+        if let Some(known) = state.boundaries.get(index) {
+            if start == Some(row.start) && known.end == row.end && known.digest == row.digest {
+                return Ok(());
+            }
+            state.boundaries.truncate(index);
+            drop(state.outbounds.split_off(&seq));
         }
-        if index == state.rows.len() && state.rows.last().map_or(0, |last| last.end) == row.start {
-            state.rows.push(row);
+        if index == state.boundaries.len() && start == Some(row.start) {
+            state.boundaries.push(RowBoundary { end: row.end, digest: row.digest });
+            if let Some(outbound) = row.outbound {
+                state.outbounds.insert(seq, outbound);
+            }
         }
         Ok(())
     }
@@ -234,8 +301,8 @@ impl LedgerRows {
     fn outbound_matching(&self, file: LedgerFile, upper: u64, predicate: impl Fn(&OutboundRow) -> bool) -> Result<Vec<u64>, String> {
         let state = self.state()?;
         if state.file != Some(file) { return Err("ledger row index lost its exact ledger".into()); }
-        Ok(state.rows.iter().take(usize::try_from(upper).unwrap_or(usize::MAX)).enumerate()
-            .filter(|(_, row)| row.outbound.as_ref().is_some_and(&predicate)).map(|(seq, _)| seq as u64).collect())
+        Ok(state.outbounds.range(..upper)
+            .filter_map(|(&seq, row)| predicate(row).then_some(seq)).collect())
     }
 }
 
