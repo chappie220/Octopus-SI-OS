@@ -86,6 +86,29 @@ where its declared file authority already lets it write that path. The service's
 control socket is granted by path to a process with sandbox delegation and
 denied by path to every other process.
 
+### Kernels with coarse Unix socket mediation
+
+If AppArmor is active but its parser reports that the kernel cannot enforce the
+fine-grained Unix socket rule, install the updated process-authority binary and
+set this systemd override with `sudo systemctl edit octopus-process-authority.service`:
+
+```ini
+[Service]
+Environment=OCTOPUS_APPARMOR_UNIX_COMPAT=1
+```
+
+Run `sudo systemctl restart octopus-process-authority.service`, then restart
+the Octopus runtime for the same Home so its interfaces are launched again.
+This option uses AppArmor's family-and-type network rules. Processes without
+network or local IPC authority can use abstract Unix stream sockets as well as
+unnamed stream socket pairs. The profile still limits other socket families,
+filesystem paths and access to the process-authority socket according to its
+grant. The parser may still report that it generated a generic rule for the
+Unix socket family. This specific diagnostic is accepted in compatibility mode;
+other diagnostics still stop the launch. Enable the override only on a
+dedicated host with that kernel limitation. Remove the override and restart
+both services to restore fine-grained enforcement after upgrading the kernel.
+
 Library tests that launch confined processes (including `octopus-verifiers`) also
 require this service to be installed and running. Without it they fail closed;
 installing the distribution AppArmor package alone is not sufficient.

@@ -398,7 +398,12 @@ impl LinuxProcessPolicy {
         Ok(())
     }
 
-    pub fn apparmor_profile(&self, name: &str, uid: u32) -> Result<String, String> {
+    pub fn apparmor_profile(
+        &self,
+        name: &str,
+        uid: u32,
+        unix_mediation: UnixSocketMediation,
+    ) -> Result<String, String> {
         let prefix = format!("octopus-{uid}-");
         let suffix = name
             .strip_prefix(&prefix)
@@ -457,11 +462,19 @@ impl LinuxProcessPolicy {
             }
         }
         if self.allow_network {
-            profile.push_str("  network,\n  unix,\n");
+            profile.push_str("  network,\n");
         } else if self.allow_local_ipc || self.allow_application_launch {
-            profile.push_str("  network unix,\n  unix,\n");
-        } else {
-            profile.push_str(ANONYMOUS_STREAM_SOCKETS);
+            profile.push_str("  network unix,\n");
+        }
+        let allow_unix =
+            self.allow_network || self.allow_local_ipc || self.allow_application_launch;
+        match unix_mediation {
+            UnixSocketMediation::FineGrained if allow_unix => profile.push_str("  unix,\n"),
+            UnixSocketMediation::FineGrained => profile.push_str(ANONYMOUS_STREAM_SOCKETS),
+            UnixSocketMediation::FamilyAndType if !allow_unix => {
+                profile.push_str("  network unix stream,\n");
+            }
+            UnixSocketMediation::FamilyAndType => {}
         }
         if self.allow_application_launch {
             profile.push_str("  dbus (send, receive),\n");
@@ -473,9 +486,10 @@ impl LinuxProcessPolicy {
             profile.push_str(&format!("  change_profile -> octopus-{uid}-*,\n"));
             profile.push_str("  change_profile -> unconfined,\n  /proc/[0-9]*/attr/current w,\n");
             profile.push_str(&format!("  \"{PLATFORM_EXECUTABLE}\" rmix,\n"));
-            profile.push_str(&format!(
-                "  \"{CONTROL_SOCKET}\" rw,\n  unix (create, getattr, getopt, setopt),\n"
-            ));
+            profile.push_str(&format!("  \"{CONTROL_SOCKET}\" rw,\n"));
+            if unix_mediation == UnixSocketMediation::FineGrained {
+                profile.push_str("  unix (create, getattr, getopt, setopt),\n");
+            }
         } else {
             profile.push_str(&format!("  deny \"{CONTROL_SOCKET}\" rw,\n"));
         }
@@ -484,6 +498,12 @@ impl LinuxProcessPolicy {
         );
         Ok(profile)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnixSocketMediation {
+    FineGrained,
+    FamilyAndType,
 }
 
 /// A process without network or local IPC authority still owns unnamed stream
@@ -641,6 +661,20 @@ mod tests {
     use super::*;
 
     fn profile(network: bool, local_ipc: bool, delegation: bool) -> String {
+        profile_with_mediation(
+            network,
+            local_ipc,
+            delegation,
+            UnixSocketMediation::FineGrained,
+        )
+    }
+
+    fn profile_with_mediation(
+        network: bool,
+        local_ipc: bool,
+        delegation: bool,
+        unix_mediation: UnixSocketMediation,
+    ) -> String {
         LinuxProcessPolicy {
             files: vec![FileRule {
                 selector: FileSelector::Tree {
@@ -655,7 +689,11 @@ mod tests {
             allow_sandbox_delegation: delegation,
             allow_process_signals: false,
         }
-        .apparmor_profile(&format!("octopus-1000-{}", "0".repeat(64)), 1000)
+        .apparmor_profile(
+            &format!("octopus-1000-{}", "0".repeat(64)),
+            1000,
+            unix_mediation,
+        )
         .unwrap()
     }
 
@@ -709,6 +747,41 @@ mod tests {
         assert!(generated.contains("  /sys/devices/system/node/** r,\n"), "{generated}");
         assert!(generated.contains("  /sys/fs/cgroup/**/{cpu.max,cpu.cfs_quota_us,cpu.cfs_period_us,memory.max,memory.limit_in_bytes} r,\n"), "{generated}");
         assert!(generated.contains("  deny /sys/fs/cgroup/** wkl,\n"), "{generated}");
+    }
+
+    #[test]
+    fn compatibility_uses_network_rules_and_preserves_control_socket_path() {
+        for (network, local_ipc, delegation) in shapes() {
+            let profile = profile_with_mediation(
+                network,
+                local_ipc,
+                delegation,
+                UnixSocketMediation::FamilyAndType,
+            );
+            assert!(
+                !profile
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("unix ")
+                        || line.trim_start() == "unix,"),
+                "{profile}"
+            );
+            let rule = if network {
+                "  network,"
+            } else if local_ipc {
+                "  network unix,"
+            } else {
+                "  network unix stream,"
+            };
+            assert_eq!(
+                profile
+                    .lines()
+                    .filter(|line| line.starts_with("  network"))
+                    .collect::<Vec<_>>(),
+                [rule],
+            );
+            let access = if delegation { "" } else { "deny " };
+            assert!(profile.contains(&format!("  {access}\"{CONTROL_SOCKET}\" rw,\n")));
+        }
     }
 
     #[test]
