@@ -360,7 +360,8 @@ impl DurableLog {
         Ok((log, movements))
     }
 
-    fn open_with_projection(path: &Path, collect: impl FnMut(Movement)) -> LedgerResult<Self> {
+    /// Observe each committed row in sequence order during ledger validation.
+    pub fn open_with_projection(path: &Path, collect: impl FnMut(Movement)) -> LedgerResult<Self> {
         let path = path.to_path_buf();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -652,23 +653,32 @@ impl DurableLog {
     }
 
     pub fn try_boot_movements_from(&self, from: Seq) -> LedgerResult<Vec<Movement>> {
+        let mut movements = Vec::new();
+        self.try_scan_boot_movements(from, |movement| movements.push(movement))?;
+        Ok(movements)
+    }
+
+    pub fn try_scan_boot_movements(
+        &self,
+        from: Seq,
+        mut visit: impl FnMut(Movement),
+    ) -> LedgerResult<()> {
         self.require_same_ledger()?;
         let start = from.0 as usize;
         let Some(&offset) = self.offsets.get(start) else {
-            return Ok(Vec::new());
+            return Ok(());
         };
-        let mut movements = Vec::new();
         Self::visit_projected_rows_from(
             &self.path,
             &self.metadata,
             offset,
             start,
             &mut |_, movement, _| {
-                movements.push(movement);
+                visit(movement);
                 ControlFlow::Continue(())
             },
         )?;
-        Ok(movements)
+        Ok(())
     }
 
     pub fn try_movement_at(&self, seq: Seq) -> LedgerResult<Option<Movement>> {

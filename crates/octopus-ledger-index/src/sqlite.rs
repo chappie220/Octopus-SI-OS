@@ -526,8 +526,7 @@ impl LedgerSqliteIndex {
         if watermark == 0 {
             return Ok(true);
         }
-        let last = log.read_from(Seq(watermark - 1));
-        let Some(truth) = last.first() else {
+        let Some(truth) = log.read_at(Seq(watermark - 1)) else {
             return Ok(false);
         };
         let spot: Option<(i64, String)> = self
