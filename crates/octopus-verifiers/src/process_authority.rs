@@ -67,23 +67,28 @@ impl PreparedProcess {
         &self,
     ) -> (std::process::Command, impl FnOnce(std::io::Error) -> String + use<>) {
         #[cfg(target_os = "linux")]
-        let (command, diagnostics) = match self.linux_lease.as_ref()
-            .and_then(|lease| crate::linux_process::spawn_diagnostics().map(|pipe| (lease, pipe)))
-        {
-            Some((lease, (reader, writer))) => {
-                let mut command = self.unconfigured_command();
-                lease.configure(&mut command, Some(writer));
-                (command, Some(reader))
-            }
-            None => (self.command(), None),
+        let (command, diagnostics) = match &self.linux_lease {
+            Some(lease) => match crate::linux_process::SpawnDiagnostics::new() {
+                Ok(diagnostics) => {
+                    let diagnostics = std::sync::Arc::new(diagnostics);
+                    let mut command = self.unconfigured_command();
+                    lease.configure(&mut command, Some(diagnostics.clone()));
+                    (command, Ok(Some(diagnostics)))
+                }
+                Err(error) => (self.command(), Err(error)),
+            },
+            None => (self.command(), Ok(None)),
         };
         #[cfg(not(target_os = "linux"))]
         let command = self.command();
         (command, move |error| {
             #[cfg(target_os = "linux")]
-            if let Some(reader) = diagnostics {
-                return crate::linux_process::describe_spawn_error(reader, error);
+            match diagnostics {
+                Ok(Some(diagnostics)) => crate::linux_process::describe_spawn_error(&diagnostics, error),
+                Ok(None) => format!("{error} (launch has no Linux authority transition)"),
+                Err(diagnostic_error) => format!("{error} (Linux spawn diagnostics unavailable: {diagnostic_error})"),
             }
+            #[cfg(not(target_os = "linux"))]
             error.to_string()
         })
     }

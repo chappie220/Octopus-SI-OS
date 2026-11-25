@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import socket
@@ -127,6 +128,7 @@ def exercise_runtime(runtime, home, name, target_phase):
         if target_phase == "ready":
             assert f"{ROW_COUNT} movements indexed" in output, output
             assert f"1 replay rows · {ROW_COUNT - 1} linked refusals streamed" in output, output
+            assert re.search(r"memory\s+RSS \d+ KiB · peak \d+ KiB", output), output
             assert "1 durable run(s)" in output, output
             assert "discovering descriptor-owned life processes" in output, output
         else:

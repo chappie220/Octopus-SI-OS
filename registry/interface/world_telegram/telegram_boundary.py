@@ -43,6 +43,8 @@ _VERDICT_INPUT_ERROR = None
 _NEXT_REQUEST_ID = 1
 _LEDGER_LOCK = threading.RLock()
 _LEDGER_FALLBACK = {"offset": 0, "size": 0, "identity": None}
+_LEDGER_INDEX_RETRY_SECONDS = 30
+_ledger_index_retry_at = 0
 _STDERR_LOCK = threading.Lock()
 _STDERR = {"budget": 196608, "keys": set()}
 SANITIZE = [lambda value: value]
@@ -482,11 +484,14 @@ def read_ledger(next_seq, limit, max_row_bytes):
 
 
 def read_outbound(next_seq, config, limit=128):
-    try:
-        return read_index(next_seq, limit)
-    except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as error:
-        stderr(f"Telegram ledger index unavailable; reading ledger truth: {error}", key=f"ledger-index:{type(error).__name__}")
-        return read_ledger(next_seq, limit, config["ledger"]["max_row_bytes"])
+    global _ledger_index_retry_at
+    if time.monotonic() >= _ledger_index_retry_at:
+        try:
+            return read_index(next_seq, limit)
+        except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as error:
+            _ledger_index_retry_at = time.monotonic() + _LEDGER_INDEX_RETRY_SECONDS
+            stderr(f"Telegram ledger index unavailable; reading ledger truth: {error}", key=f"ledger-index:{type(error).__name__}")
+    return read_ledger(next_seq, limit, config["ledger"]["max_row_bytes"])
 
 
 for _directory in (VAR_DIR, PAYLOAD_DIR, REQUEST_DIR):

@@ -67,6 +67,11 @@ pub enum DaemonBootEvent {
     },
 }
 
+pub(crate) struct DaemonBootProgress {
+    pub(crate) event: DaemonBootEvent,
+    pub(crate) memory_kib: Option<(u64, u64)>,
+}
+
 pub struct Arrival {
     pub artifact: InterfaceArtifactFile,
     pub interface: InterfaceId,
@@ -342,7 +347,7 @@ pub(crate) async fn run_daemon_on_dirs(
     emissions: tokio::sync::mpsc::Receiver<SystemInterfaceEmission>,
     cancel: CancellationToken,
     ready: Option<tokio::sync::oneshot::Sender<()>>,
-    boot_events: Option<tokio::sync::mpsc::UnboundedSender<DaemonBootEvent>>,
+    boot_events: Option<tokio::sync::mpsc::UnboundedSender<DaemonBootProgress>>,
     movement_wakes: Option<octopus_interface_transport::InterfaceMovementWakes>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     octopus_file_storage::publication::create_dir_all(durable_root)?;
@@ -753,12 +758,35 @@ async fn catch_up_changed_relay_bindings(
 }
 
 fn publish_boot_event(
-    tx: &Option<tokio::sync::mpsc::UnboundedSender<DaemonBootEvent>>,
+    tx: &Option<tokio::sync::mpsc::UnboundedSender<DaemonBootProgress>>,
     event: DaemonBootEvent,
 ) {
     if let Some(tx) = tx {
-        let _ = tx.send(event);
+        let memory_kib = match event {
+            DaemonBootEvent::LedgerOpening { .. }
+            | DaemonBootEvent::LedgerProjected { .. }
+            | DaemonBootEvent::SpineReady
+            | DaemonBootEvent::CheckpointsReconstructed
+            | DaemonBootEvent::OutboundTailRecovered { .. }
+            | DaemonBootEvent::SpotlightOpening
+            | DaemonBootEvent::SpotlightReady { .. }
+            | DaemonBootEvent::StateRebuilt { .. } => boot_memory_kib(),
+            _ => None,
+        };
+        let _ = tx.send(DaemonBootProgress { event, memory_kib });
     }
+}
+
+fn boot_memory_kib() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let value = |key| status.lines().find_map(|line| line.strip_prefix(key))?
+            .split_whitespace().next()?.parse().ok();
+        Some((value("VmRSS:")?, value("VmHWM:")?))
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
