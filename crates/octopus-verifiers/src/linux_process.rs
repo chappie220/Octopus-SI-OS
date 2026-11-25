@@ -2,7 +2,7 @@ use crate::process_authority::linux::{
     FileAccess, FileSelector, LinuxProcessPolicy, CONTROL_SOCKET, MAX_REQUEST_BYTES,
 };
 use std::ffi::CString;
-use std::io::{BufRead, BufReader, PipeReader, PipeWriter, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -10,6 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Debug)]
 pub(crate) struct LinuxLease {
@@ -139,7 +140,11 @@ impl LinuxLease {
         })
     }
 
-    pub(crate) fn configure(self: &Arc<Self>, command: &mut Command, diagnostics: Option<PipeWriter>) {
+    pub(crate) fn configure(
+        self: &Arc<Self>,
+        command: &mut Command,
+        diagnostics: Option<Arc<SpawnDiagnostics>>,
+    ) {
         let lease = Arc::clone(self);
         let request = format!("ATTACH {}\n", self.token).into_bytes();
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -152,7 +157,7 @@ impl LinuxLease {
             + 1) as libc::socklen_t;
         unsafe {
             command.pre_exec(move || {
-                let diagnostics = diagnostics.as_ref();
+                let diagnostics = diagnostics.as_deref();
                 attach_child(&address, address_length, &request, diagnostics)?;
                 report_stage(diagnostics, b'U', change_profile(b"changeprofile unconfined"))?;
                 for directory in &lease.directories {
@@ -169,34 +174,59 @@ impl LinuxLease {
     }
 }
 
-pub(crate) fn spawn_diagnostics() -> Option<(PipeReader, PipeWriter)> {
-    let (reader, writer) = std::io::pipe().ok()?;
-    if unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
-        return None;
+pub(crate) struct SpawnDiagnostics(std::ptr::NonNull<AtomicU8>);
+
+// The mapping is shared across fork and its only contents are accessed atomically.
+unsafe impl Send for SpawnDiagnostics {}
+unsafe impl Sync for SpawnDiagnostics {}
+
+impl SpawnDiagnostics {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        let length = std::mem::size_of::<AtomicU8>();
+        let mapped = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        let Some(stage) = std::ptr::NonNull::new(mapped.cast::<AtomicU8>()) else {
+            unsafe { libc::munmap(mapped, length) };
+            return Err(std::io::Error::other("spawn diagnostics mapping has a null address"));
+        };
+        unsafe { stage.as_ptr().write(AtomicU8::new(0)) };
+        Ok(Self(stage))
     }
-    Some((reader, writer))
 }
 
-pub(crate) fn describe_spawn_error(mut reader: PipeReader, error: std::io::Error) -> String {
-    let mut stage = [0];
-    let stage = match reader.read(&mut stage) {
-        Ok(1) => match stage[0] {
-            b'C' => "connecting the child to Linux process authority",
-            b'A' => "attaching the child to Linux process authority",
-            b'U' => "switching to the directory preparation profile",
-            b'D' => "preparing an authorized directory",
-            b'P' => "applying the prepared AppArmor profile",
-            b'N' => "setting no_new_privs",
-            b'X' => "launching the program after Linux authority setup",
-            _ => return error.to_string(),
-        },
-        _ => return error.to_string(),
+impl Drop for SpawnDiagnostics {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.0.as_ptr().cast(), std::mem::size_of::<AtomicU8>()) };
+    }
+}
+
+pub(crate) fn describe_spawn_error(diagnostics: &SpawnDiagnostics, error: std::io::Error) -> String {
+    let stage = match unsafe { diagnostics.0.as_ref() }.load(Ordering::Relaxed) {
+        b'C' => "connecting the child to Linux process authority",
+        b'A' => "attaching the child to Linux process authority",
+        b'U' => "switching to the directory preparation profile",
+        b'D' => "preparing an authorized directory",
+        b'P' => "applying the prepared AppArmor profile",
+        b'N' => "setting no_new_privs",
+        b'X' => "launching the program after Linux authority setup",
+        _ => "starting the child before Linux authority setup",
     };
     format!("{error} (while {stage})")
 }
 
 fn report_stage(
-    diagnostic: Option<&PipeWriter>, stage: u8, result: std::io::Result<()>,
+    diagnostic: Option<&SpawnDiagnostics>, stage: u8, result: std::io::Result<()>,
 ) -> std::io::Result<()> {
     if result.is_err() {
         write_stage(diagnostic, stage);
@@ -204,9 +234,9 @@ fn report_stage(
     result
 }
 
-fn write_stage(diagnostic: Option<&PipeWriter>, stage: u8) {
+fn write_stage(diagnostic: Option<&SpawnDiagnostics>, stage: u8) {
     if let Some(diagnostic) = diagnostic {
-        unsafe { libc::write(diagnostic.as_raw_fd(), std::ptr::from_ref(&stage).cast(), 1) };
+        unsafe { diagnostic.0.as_ref() }.store(stage, Ordering::Relaxed);
     }
 }
 
@@ -214,7 +244,7 @@ fn attach_child(
     address: &libc::sockaddr_un,
     address_length: libc::socklen_t,
     request: &[u8],
-    diagnostics: Option<&PipeWriter>,
+    diagnostics: Option<&SpawnDiagnostics>,
 ) -> std::io::Result<()> {
     unsafe {
         let socket = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
@@ -338,11 +368,16 @@ mod tests {
     fn spawn_diagnostics_distinguish_setup_failure_from_exec_failure() {
         let missing = tempfile::tempdir().unwrap().path().join("missing-executable");
         for (stage, errno, label) in [
+            (0, libc::ENOENT, "starting the child before Linux authority setup"),
             (b'P', libc::EACCES, "applying the prepared AppArmor profile"),
             (b'X', libc::ENOENT, "launching the program after Linux authority setup"),
         ] {
-            let (reader, writer) = spawn_diagnostics().unwrap();
+            let diagnostics = Arc::new(SpawnDiagnostics::new().unwrap());
+            let writer = Arc::clone(&diagnostics);
             let mut command = Command::new(&missing);
+            if stage == 0 {
+                command.current_dir(&missing);
+            }
             unsafe {
                 command.pre_exec(move || {
                     if stage == b'X' {
@@ -355,7 +390,7 @@ mod tests {
             }
             let error = command.spawn().unwrap_err();
             assert_eq!(error.raw_os_error(), Some(errno));
-            assert!(describe_spawn_error(reader, error).contains(label));
+            assert!(describe_spawn_error(&diagnostics, error).contains(label));
         }
     }
 }

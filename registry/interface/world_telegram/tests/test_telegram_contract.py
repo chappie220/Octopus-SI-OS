@@ -354,6 +354,13 @@ class LifeTests(unittest.TestCase):
         Path(os.environ["OCTOPUS_MOVEMENTS_JSONL"]).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         self.assertEqual(self.boundary.read_outbound(0, self.config), [(7, [0] * 32, "run_t")])
         self.assertEqual(self.boundary.read_outbound(8, self.config), [])
+        with mock.patch.object(self.boundary, "read_index", return_value=[(9, None, "run_t")]) as index:
+            with mock.patch.object(self.boundary.time, "monotonic", return_value=self.boundary._ledger_index_retry_at - 1):
+                self.assertEqual(self.boundary.read_outbound(8, self.config), [])
+                index.assert_not_called()
+            with mock.patch.object(self.boundary.time, "monotonic", return_value=self.boundary._ledger_index_retry_at):
+                self.assertEqual(self.boundary.read_outbound(9, self.config), [(9, None, "run_t")])
+                index.assert_called_once_with(9, 128)
         Path(os.environ["OCTOPUS_MOVEMENTS_JSONL"]).write_text('{"seq":9}', encoding="utf-8")
         self.boundary._LEDGER_FALLBACK.update({"offset": 0, "size": 0, "identity": None})
         with self.assertRaisesRegex(RuntimeError, "partial"):

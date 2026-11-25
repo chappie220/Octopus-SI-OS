@@ -769,8 +769,8 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn report_daemon_boot_event(boot: &mut boot_report::BootReport, event: daemon::DaemonBootEvent) {
-    match event {
+fn report_daemon_boot_event(boot: &mut boot_report::BootReport, progress: daemon::DaemonBootProgress) {
+    match progress.event {
         daemon::DaemonBootEvent::LedgerOpening { path } => {
             boot.stage("ledger", format_args!("opening {}", path.display()));
         }
@@ -822,6 +822,9 @@ fn report_daemon_boot_event(boot: &mut boot_report::BootReport, event: daemon::D
             "state",
             format_args!("{durable_runs} durable run(s) · {ee_scopes} EE scope(s)"),
         ),
+    }
+    if let Some((rss, peak)) = progress.memory_kib {
+        boot.stage("memory", format_args!("RSS {rss} KiB · peak {peak} KiB"));
     }
 }
 
