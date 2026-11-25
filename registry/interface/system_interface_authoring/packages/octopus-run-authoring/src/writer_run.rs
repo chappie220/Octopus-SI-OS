@@ -1229,6 +1229,7 @@ struct ReturnedWriterCall {
     epoch: u64,
     call: Seq,
     result: Seq,
+    error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1493,6 +1494,9 @@ fn history(
                     epoch: coordinate.epoch,
                     call: call.seq,
                     result: movement.seq,
+                    error: result.error.as_ref().filter(|_| !result.ok).map(|error| {
+                        format!("{}: {}", error.code, error.message.chars().take(1024).collect::<String>())
+                    }),
                 });
             current.result_calls.insert(movement.seq.0, call.artifact.clone().ok_or("writer call has no retained artifact")?);
             current.current = snapshot;
@@ -1680,10 +1684,17 @@ impl ProviderOutputHandoff {
         let still_active = record.active_checkpoints.contains(&returned.checkpoint)
             && record.checkpoint(&returned.checkpoint)
                 .is_some_and(|checkpoint| checkpoint.epoch.0 == returned.epoch);
-        Ok(still_active.then(|| format!(
-            "writer run '{}' still has spent checkpoint '{}' at epoch {} after call {} returned result {}",
-            record.id, returned.checkpoint, returned.epoch, returned.call.0, returned.result.0,
-        )))
+        Ok(still_active.then(|| {
+            let mut message = format!(
+                "writer run '{}' still has spent checkpoint '{}' at epoch {} after call {} returned result {}",
+                record.id, returned.checkpoint, returned.epoch, returned.call.0, returned.result.0,
+            );
+            if let Some(error) = &returned.error {
+                message.push_str(". Tool result: ");
+                message.push_str(error);
+            }
+            message
+        }))
     }
 
     fn writer_attempts(&self, authoring_generation: u64) -> Result<Vec<Attempt>, String> {

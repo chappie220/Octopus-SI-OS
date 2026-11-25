@@ -64,6 +64,14 @@ then repair the installed package from the updated checkout and distribution:
 ./octopus application repair world_provider_codex
 ```
 
+When updating System Room, repair its Driver while the runtime is stopped.
+System Room owns the door process and the `file.write` executable. Repairing an
+Application checks its installed dependencies and updates the selected Application.
+
+```sh
+./octopus driver repair system_room
+```
+
 Start the runtime again after the repair succeeds. Use the same `--home`
 selection as the running service and pass `--bundle` if the distribution is
 outside the checkout's default location.

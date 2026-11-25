@@ -29,6 +29,7 @@ def write_ledger(path):
         "to": {"Interface": worker},
         "artifact": {"id": "tool.call:" + "ab" * 32, "content": [171] * 32},
         "invocation_metadata": {
+            "delivery_scope_seq": 0,
             "delivery_verdict": {"refused": {
                 "reason": "checkpoint_spent",
                 "detail": {"message": (
@@ -50,8 +51,22 @@ def write_ledger(path):
         },
     }
     suffix = json.dumps(row, separators=(",", ":"))[1:].encode() + b"\n"
+    scope = {
+        **row,
+        "seq": 0,
+        "lamport": 1,
+        "kind": "ArtifactMoved",
+        "to": row["from"],
+        "invocation_metadata": {
+            "arrival_fanout": {
+                "identity": "test-refusal-fanout",
+                "targets": [row["invocation_metadata"]["runtime"]],
+            },
+        },
+    }
     with path.open("wb", buffering=1 << 20) as ledger:
-        for seq in range(ROW_COUNT):
+        ledger.write(json.dumps(scope, separators=(",", ":")).encode() + b"\n")
+        for seq in range(1, ROW_COUNT):
             ledger.write(f'{{"seq":{seq},"lamport":{seq + 1},'.encode() + suffix)
 
 
@@ -111,6 +126,7 @@ def exercise_runtime(runtime, home, name, target_phase):
         assert f"SIGTERM from pid {os.getpid()} (uid {os.getuid()})" in output, output
         if target_phase == "ready":
             assert f"{ROW_COUNT} movements indexed" in output, output
+            assert f"1 replay rows · {ROW_COUNT - 1} linked refusals streamed" in output, output
             assert "1 durable run(s)" in output, output
             assert "discovering descriptor-owned life processes" in output, output
         else:
@@ -142,7 +158,7 @@ def main():
             assert index.execute("""
                 SELECT COUNT(*) FROM movements
                 WHERE kind = 'DeliveryRefused' AND runtime_run = 'run_writer_fixture'
-            """).fetchone()[0] == ROW_COUNT
+            """).fetchone()[0] == ROW_COUNT - 1
         exercise_runtime(runtime, home, "warm-index", "ready")
         exercise_runtime(runtime, home, "cancel-during-replay", "restoring_runtime")
         assert ledger_digest(ledger) == original

@@ -115,7 +115,8 @@ function createEnvironment(options = {}) {
     async doctor(request = {}) { return runRuntimeCommand(environment, "doctor", request); },
     requireDistribution() { return requireDistribution(environment); },
     async setup(request = {}) { return require("./setup.cjs").setupEnvironment(environment, request); },
-    async repairApplication(request) { return repairApplication(environment, request); },
+    async repairApplication({ applicationId, operationId }) { return repairPackage(environment, applicationId, "application", operationId); },
+    async repairDriver({ driverId, operationId }) { return repairPackage(environment, `driver.${driverId}`, "driver", operationId); },
     async connectApplication(request, options = {}) {
       const { createApplicationConnectionHost, createRegistryConnectionTargets } = require("../electron/applicationConnection.cjs");
       const host = createApplicationConnectionHost({
@@ -267,19 +268,19 @@ async function assertRuntimeStopped(environment, host, message, signal) {
   }
 }
 
-async function repairApplication(environment, { applicationId, operationId }) {
+async function repairPackage(environment, packageId, productKind, operationId) {
   const roots = environment.packageRoots;
   const host = runtimeHost(environment);
-  const assertStopped = () => assertRuntimeStopped(environment, host, "Stop the Octopus runtime before repairing an installed Application.");
+  const assertStopped = () => assertRuntimeStopped(environment, host, `Stop the Octopus runtime before repairing an installed ${productKind}.`);
   await assertStopped();
   const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: roots.stateRoot, guard: assertStopped });
   try {
     await recoverLocalPackageTransactions(roots);
-    const entry = await inspectLocalPackageInstallation({ ...roots, packageId: applicationId });
-    if (entry.product_kind !== "application") throw new Error(`Package '${applicationId}' is not an Application.`);
+    const entry = await inspectLocalPackageInstallation({ ...roots, packageId });
+    if (entry.product_kind !== productKind) throw new Error(`Package '${packageId}' has kind '${entry.product_kind}', expected '${productKind}'.`);
     return await repairLocalPackages({
-      ...roots, operationId, packageIds: [applicationId],
-      expectedRepairs: { [applicationId]: { sourceDigest: entry.source_digest, installedDigest: entry.installed_digest,
+      ...roots, operationId, packageIds: [packageId],
+      expectedRepairs: { [packageId]: { sourceDigest: entry.source_digest, installedDigest: entry.installed_digest,
         receiptState: entry.receipt_state, receiptDigest: entry.receipt_digest || null } },
     });
   } finally { releaseGuard(); }

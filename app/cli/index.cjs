@@ -21,6 +21,7 @@ const HELP = `Octopus — your agentic operating system, in the terminal
   octopus project delete <id> --yes  Delete a Project
   octopus application connect <id> [interface]  Connect an installed Application using its declared environment
   octopus application repair <id>  Update an installed Application from the selected runtime distribution
+  octopus driver repair <id>      Update an installed Driver from the selected runtime distribution
   octopus agent create <name>     Create an Agent with an explicit model
   octopus agent delete <id> --yes  Delete an Agent
   octopus models                  Show available permitted models
@@ -120,7 +121,7 @@ async function main(argv = process.argv.slice(2), io = process) {
       ...(flags.access === undefined ? {} : { access: taskAccess(flags.access) }),
     };
     const words = [...parsed.positionals];
-    const known = new Set(["chat", "resume", "exec", "send", "watch", "tasks", "history", "inspect", "projects", "models", "answer", "stop", "rename", "archive", "restore", "delete", "export", "setup", "up", "serve", "down", "restart", "status", "doctor", "application", "agent", "project", "download"]);
+    const known = new Set(["chat", "resume", "exec", "send", "watch", "tasks", "history", "inspect", "projects", "models", "answer", "stop", "rename", "archive", "restore", "delete", "export", "setup", "up", "serve", "down", "restart", "status", "doctor", "application", "driver", "agent", "project", "download"]);
     const command = known.has(words[0]) ? words.shift() : "chat";
     if (flags.foreground && command !== "up") throw new Error("--foreground is only supported with 'up'.");
     const report = (value) => {
@@ -128,6 +129,12 @@ async function main(argv = process.argv.slice(2), io = process) {
       else io.stdout.write(`${safeText(presentResult(value))}\n`);
     };
     if (flags.port !== undefined && command !== "serve") throw new Error("--port is available only for serve.");
+    if (command === "driver") {
+      const [action, driverId] = words;
+      if (action !== "repair" || !driverId || words.length !== 2) throw new Error("Use 'driver repair <id>'.");
+      report(await environment.repairDriver({ driverId, operationId: randomUUID() }));
+      return 0;
+    }
     if (command === "application") {
       const [action, applicationId, interfaceId = applicationId, ...remaining] = words;
       if (action === "repair" && applicationId && words.length === 2) {
