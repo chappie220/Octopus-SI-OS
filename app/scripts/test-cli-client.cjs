@@ -163,6 +163,39 @@ test("wrong task receipts fail before reading, detach does not send Stop, watch 
   });
 });
 
+test("a fresh exec follows the admitted cursor without rebuilding task history", async () => {
+  const store = { async read({ method }) {
+    if (method === "projection.operator.providers.list") return { providers: [] };
+    assert.equal(method, "projection.operator.chat.contexts");
+    return { contexts: [{ ee_id: "project", agent_catalog_digest: "catalog", workers: [{
+      id: "worker", client_agent_id: "agent", client_agent_name: "Agent", client_agent_icon: "default",
+      client_template_digest: "template", client_template_provider_interface_id: "provider",
+      client_template_provider_model: "model", client_template_reasoning_effort: "medium",
+      provider_interface_ids: ["provider"], interface_policy: { provider: { models: ["model"] } },
+    }] }] };
+  }, invalidate() {}, close() {} };
+  const transport = {
+    async submitOperatorTurn() { return { ...receipt, outboundCursor: receipt.cursor }; },
+    async readOperatorChatArtifacts(_options, request) {
+      assert.deepEqual(request.cursor, receipt.cursor);
+      assert.equal(request.afterSeq, receipt.afterSeq);
+      assert.equal(request.runId, receipt.runId);
+      return { artifacts: [movement(120)], cursor: { offset: 20, seq: 121 } };
+    },
+  };
+  const client = createClient({ home: os.tmpdir(), packageRoots: {}, status: async () => ({ runtimeReady: true }) }, {
+    store, loader: { load: async () => transport }, metadata: { catalog: async () => [{ id: "provider", models: [{
+      model: "model", showInPicker: true, supportedReasoningEfforts: ["medium"],
+    }] }] },
+  });
+  try {
+    const submitted = await client.send({ agentId: "agent", text: "Run", access: "project_access" });
+    const events = await Array.fromAsync(client.follow(submitted.runId, { ...submitted, cursor: { offset: 0, seq: null } }));
+    assert.equal(events.at(-1).terminal, true);
+    assert.equal(events.at(-1).entry.text, "Reply");
+  } finally { await client.close(); }
+});
+
 test("an early idle projection cannot hide a final reply that has not arrived yet", async () => {
   await fixture([[], [movement(120)]], async (client, reads) => {
     const events = await Array.fromAsync(client.follow(run.run_id));

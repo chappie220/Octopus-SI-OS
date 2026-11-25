@@ -22,6 +22,7 @@ function createClient(environment, dependencies = {}) {
   const env = environment.config ?? environment;
   const registryRoot = path.join(env.home, "registry");
   const owner = `terminal_${randomUUID()}`;
+  const newTaskReceipts = new WeakMap();
   let closed = false;
   const store = dependencies.store ?? createProjectionStore({
     resolveRepoRoot: () => env.repoRoot,
@@ -244,7 +245,17 @@ function createClient(environment, dependencies = {}) {
       });
       assertAdmission(result.messageVerdict);
       store.invalidate(!current, current ? "runs" : "structure");
-      return { ...result, cursor: result.outboundCursor, afterSeq: result.messageVerdict.admitted.seq };
+      const cursor = result.outboundCursor;
+      // A new run can follow its admission receipt directly without loading older turns.
+      if (!current && !result.messageRecovered && Number.isSafeInteger(cursor?.offset) && cursor.offset > 0) {
+        newTaskReceipts.set(result.messageVerdict, {
+          id: result.runId,
+          chatInterfaceId: result.chatInterfaceId,
+          providerBoundInterfaceId: result.modelInterfaceId,
+          cursor: { ...cursor },
+        });
+      }
+      return { ...result, cursor, afterSeq: result.messageVerdict.admitted.seq };
     } catch (error) {
       failure = error;
       throw error;
@@ -256,17 +267,20 @@ function createClient(environment, dependencies = {}) {
   }
 
   async function* follow(runId, options = {}) {
-    const current = await task(runId);
+    if (options.signal?.aborted || closed) return;
+    const newTask = newTaskReceipts.get(options.messageVerdict);
+    const current = newTask ?? await task(runId);
     if (!current.chatInterfaceId) throw new Error("This task has no operator interface.");
-    const { createTranscriptReducer } = require("./transcript.cjs");
-    const reducer = createTranscriptReducer({ history: await rawHistory(current.id) });
-    const initial = await taskStatus(current.id);
-    const afterSeq = options.afterSeq ?? initial.turn_opened_movement_seq;
+    const afterSeq = options.afterSeq ?? (await taskStatus(current.id)).turn_opened_movement_seq;
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("This task has no recorded turn to follow.");
     if (options.messageVerdict) {
-      if (options.runId !== current.id || options.chatInterfaceId !== current.chatInterfaceId
+      if ((newTask && runId !== current.id) || options.runId !== current.id || options.chatInterfaceId !== current.chatInterfaceId
         || options.modelInterfaceId !== current.providerBoundInterfaceId) throw new Error("The submission receipt belongs to a different task.");
       if (afterSeq !== options.messageVerdict.admitted?.seq) throw new Error("The follow cursor has a different admission frontier from its receipt.");
+    }
+    const { createTranscriptReducer } = require("./transcript.cjs");
+    const reducer = createTranscriptReducer({ history: newTask ? [] : await rawHistory(current.id) });
+    if (options.messageVerdict) {
       const events = reducer.beginTurn(options);
       for (const entry of reducer.snapshot()) {
         const m = entry.metadata;
@@ -297,7 +311,7 @@ function createClient(environment, dependencies = {}) {
       }
     }
     const chat = await loader.load();
-    let cursor = options.cursor;
+    let cursor = newTask?.cursor ?? options.cursor;
     let lastProbe = 0;
     for (;;) {
       if (options.signal?.aborted || closed) return;
