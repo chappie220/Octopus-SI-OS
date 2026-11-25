@@ -1,4 +1,5 @@
 use super::*;
+use octopus_ledger::{MovementMetadata, Seq};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1223,11 +1224,20 @@ struct UnresolvedTarget {
 }
 
 #[derive(Clone)]
+struct ReturnedWriterCall {
+    checkpoint: CheckpointId,
+    epoch: u64,
+    call: Seq,
+    result: Seq,
+}
+
+#[derive(Clone)]
 pub(super) struct WriterHistory {
     binding: WriterRunBinding,
     next_seq: u64,
     current: Vec<u8>,
     pending: Option<(String, OrderedArguments, Movement)>,
+    last_returned_call: Option<ReturnedWriterCall>,
     completed: BTreeMap<String, (u64, bool)>,
     applied_calls: BTreeMap<String, u64>,
     result_calls: BTreeMap<u64, ArtifactRef>,
@@ -1267,6 +1277,7 @@ fn history(
         next_seq: 0,
         current: binding.initial_bytes()?,
         pending: None,
+        last_returned_call: None,
         completed: BTreeMap::new(),
         applied_calls: BTreeMap::new(),
         result_calls: BTreeMap::new(),
@@ -1466,6 +1477,21 @@ fn history(
                 return Err("writer result correlation or label differs".into());
             }
             let effect = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes, call.seq.0)?;
+            let call_metadata = call
+                .invocation_metadata
+                .as_ref()
+                .and_then(MovementMetadata::invocation)
+                .ok_or("writer call lost its checked metadata")?;
+            let coordinate = call_metadata.runtime.as_ref()
+                .ok_or("writer call lost its checked coordinate")?;
+            current.last_returned_call = call_metadata.checkpoint_admission.as_ref()
+                .filter(|admission| !admission.required_artifact_labels.is_empty())
+                .map(|_| ReturnedWriterCall {
+                    checkpoint: coordinate.checkpoint.clone(),
+                    epoch: coordinate.epoch,
+                    call: call.seq,
+                    result: movement.seq,
+                });
             current.result_calls.insert(movement.seq.0, call.artifact.clone().ok_or("writer call has no retained artifact")?);
             current.current = snapshot;
             if target_untouched(&result, effect) {
@@ -1622,6 +1648,42 @@ struct Attempt {
 }
 
 impl ProviderOutputHandoff {
+    /// An admitted call already consumed the active writer checkpoint.
+    pub fn spent_writer_checkpoint(&self) -> Result<Option<String>, String> {
+        if self.config.writer_run.is_none() {
+            return Ok(None);
+        }
+        let progress = history(&self.ctx, &self.session.writer_history, &self.config)?;
+        self.spent_writer_checkpoint_in(&progress)
+    }
+
+    fn spent_writer_checkpoint_in(&self, progress: &WriterHistory) -> Result<Option<String>, String> {
+        let Some(returned) = &progress.last_returned_call else {
+            return Ok(None);
+        };
+        if progress.pending.is_some() {
+            return Ok(None);
+        }
+        let path = self.run_path.parent().ok_or("run parent absent")?
+            .join(format!("{}.json", progress.binding.run));
+        let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+            &path,
+            self.ctx.required_host_io_limits()?.max_payload_bytes,
+        )
+        .map_err(|error| error.to_string())?;
+        let record = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        if record.id != progress.binding.run {
+            return Err("writer checkpoint readback names a different run".into());
+        }
+        let still_active = record.active_checkpoints.contains(&returned.checkpoint)
+            && record.checkpoint(&returned.checkpoint)
+                .is_some_and(|checkpoint| checkpoint.epoch.0 == returned.epoch);
+        Ok(still_active.then(|| format!(
+            "writer run '{}' still has spent checkpoint '{}' at epoch {} after call {} returned result {}",
+            record.id, returned.checkpoint, returned.epoch, returned.call.0, returned.result.0,
+        )))
+    }
+
     fn writer_attempts(&self, authoring_generation: u64) -> Result<Vec<Attempt>, String> {
         let paths = self.session.writer_call_generations.lock()
             .map_err(|_| "provider writer call index is poisoned".to_string())?
@@ -1907,6 +1969,9 @@ impl ProviderOutputHandoff {
                     state.run_record_evidence_seq = Some(last.call.seq.0);
                 }
                 continue;
+            }
+            if let Some(error) = self.spent_writer_checkpoint_in(&progress)? {
+                return Err(error);
             }
             let manifest = if let Some((_, manifest, _, _)) = &known {
                 manifest.clone()

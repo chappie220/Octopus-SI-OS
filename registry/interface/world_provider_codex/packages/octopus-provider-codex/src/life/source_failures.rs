@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) async fn close_refused_provider_handoff(
+pub(crate) async fn close_failed_provider_handoff(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,
     run: &RunId,
@@ -9,6 +9,14 @@ pub(crate) async fn close_refused_provider_handoff(
     driver: &mut Option<Arc<CodexAppServerInterfaceDriver>>,
     error: &str,
 ) -> Result<bool, String> {
+    if let Ok(Some(error)) = handoff.spent_writer_checkpoint() {
+        let error = match shutdown_driver(ctx, driver).await {
+            Ok(()) => error,
+            Err(shutdown_error) => format!("{error}; {shutdown_error}"),
+        };
+        report_provider_source_failure(ctx, run, turn.seq, &error).await?;
+        return Ok(true);
+    }
     let Some(failed) = handoff.refused_source_handoff().await? else { return Ok(false); };
     let error = match shutdown_driver(ctx, driver).await {
         Ok(()) => error.to_owned(),
@@ -47,16 +55,25 @@ pub(crate) async fn record_invalid_provider_context(
     if author_failed_provider_source(ctx, descriptor, handoff_session, run, turn, &message, false).await? {
         return Ok(());
     }
-    if let Err(route_error) = hand_failure_into_standing_route(ctx, run, turn.seq, &message).await {
+    report_provider_source_failure(ctx, run, turn.seq, &message).await
+}
+
+async fn report_provider_source_failure(
+    ctx: &InterfaceLiftContext,
+    run: &RunId,
+    source_movement_seq: u64,
+    message: &str,
+) -> Result<(), String> {
+    if let Err(route_error) = hand_failure_into_standing_route(ctx, run, source_movement_seq, message).await {
         tracing::warn!(
             interface = ctx.interface.as_str(),
             run = run.as_str(),
-            seq = turn.seq,
+            seq = source_movement_seq,
             error = %route_error,
             "codex failed provider source has no proven standing route into its run"
         );
         ctx.hand_admitted_failure(
-            turn.seq,
+            source_movement_seq,
             "provider_source_unroutable",
             serde_json::json!({"error": message, "route_error": route_error}),
         )
