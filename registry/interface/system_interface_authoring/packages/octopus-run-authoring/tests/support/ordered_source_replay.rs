@@ -283,6 +283,7 @@ async fn exercise_interrupted_source_order(
             state.run_record_bytes = seed.clone();
             let refusal = blocked.spent_writer_checkpoint().unwrap().unwrap();
             assert!(refusal.contains(&format!("after call {seq} returned result {}", seq + 1)));
+            assert!(refusal.contains("tool_effect_indeterminate: process outcome unknown"));
             let replacement = InterfaceArtifactFile::write(blocked.var_dir.join("unadvanced-output"),
                 "interface.artifact.output", br#"{"text":"a different output"}"#).unwrap();
             let replacement = make(&blocked, &seed, &replacement);

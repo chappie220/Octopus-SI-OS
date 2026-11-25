@@ -777,9 +777,11 @@ fn report_daemon_boot_event(boot: &mut boot_report::BootReport, event: daemon::D
         daemon::DaemonBootEvent::LedgerProjected {
             movements,
             unique_grants,
+            replay_rows,
+            deferred_refusals,
         } => boot.stage(
             "ledger",
-            format_args!("{movements} movements · {unique_grants} unique grants verified"),
+            format_args!("{movements} movements · {unique_grants} unique grants verified · {replay_rows} replay rows · {deferred_refusals} linked refusals streamed"),
         ),
         daemon::DaemonBootEvent::SpineOpening => {
             boot.stage("spine", "opening embedded runtime");

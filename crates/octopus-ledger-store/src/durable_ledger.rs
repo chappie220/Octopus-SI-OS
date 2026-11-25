@@ -430,6 +430,7 @@ impl DurableLog {
             metadata,
             0,
             0,
+            None,
             &mut |offset, movement, grant_content| {
                 clock = clock.max(movement.lamport.0);
                 offsets.push(offset);
@@ -451,17 +452,23 @@ impl DurableLog {
         metadata: &DurableMovementDecoder,
         start_offset: u64,
         start_seq: usize,
+        end_offset: Option<u64>,
         visit: &mut dyn FnMut(u64, Movement, Option<ContentHash>) -> ControlFlow<()>,
     ) -> LedgerResult<u64> {
-        let file = match File::open(path) {
+        let mut file = match File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(io_err(path, &e)),
         };
-        let mut reader = BufReader::with_capacity(1 << 20, file);
-        reader
-            .seek(SeekFrom::Start(start_offset))
-            .map_err(|e| io_err(path, &e))?;
+        file.seek(SeekFrom::Start(start_offset)).map_err(|e| io_err(path, &e))?;
+        let length = match end_offset {
+            Some(end) => end.checked_sub(start_offset).ok_or_else(|| LedgerError::Io {
+                path: path.display().to_string(),
+                message: "durable ledger row range ends before its start".to_string(),
+            })?,
+            None => u64::MAX,
+        };
+        let mut reader = BufReader::with_capacity((1 << 20).min(length) as usize, file.take(length));
         let mut offset = start_offset;
         let mut seq = start_seq;
         let mut buf = Vec::new();
@@ -663,20 +670,31 @@ impl DurableLog {
         from: Seq,
         mut visit: impl FnMut(Movement),
     ) -> LedgerResult<()> {
+        self.try_scan_boot_range(from..Seq(self.len() as u64), |movement| {
+            visit(movement);
+            ControlFlow::Continue(())
+        })
+    }
+
+    pub fn try_scan_boot_range(
+        &self,
+        range: std::ops::Range<Seq>,
+        mut visit: impl FnMut(Movement) -> ControlFlow<()>,
+    ) -> LedgerResult<()> {
         self.require_same_ledger()?;
-        let start = from.0 as usize;
+        if range.start >= range.end { return Ok(()); }
+        let start = range.start.0 as usize;
         let Some(&offset) = self.offsets.get(start) else {
             return Ok(());
         };
+        let end = self.offsets.get(range.end.0 as usize).copied().unwrap_or(self.end_offset);
         Self::visit_projected_rows_from(
             &self.path,
             &self.metadata,
             offset,
             start,
-            &mut |_, movement, _| {
-                visit(movement);
-                ControlFlow::Continue(())
-            },
+            Some(end),
+            &mut |_, movement, _| visit(movement),
         )?;
         Ok(())
     }

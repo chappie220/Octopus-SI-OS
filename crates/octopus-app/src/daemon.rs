@@ -44,6 +44,8 @@ pub enum DaemonBootEvent {
     LedgerProjected {
         movements: usize,
         unique_grants: usize,
+        replay_rows: usize,
+        deferred_refusals: usize,
     },
     SpineOpening,
     SpineReady,
@@ -95,6 +97,7 @@ pub struct ResumedState {
 #[derive(Default)]
 struct BootReplay {
     movements: Vec<Movement>,
+    linked_refusals: Vec<Seq>,
     runs: BTreeSet<RunId>,
 }
 
@@ -104,14 +107,49 @@ impl BootReplay {
         if let (MovementKind::DeliveryRefused, Some(MovementMetadata::Delivery(delivery))) =
             (&movement.kind, &movement.invocation_metadata)
         {
-            if delivery.source_movement_seq.is_none()
-                && delivery.delivery_scope_seq.is_none()
-                && !is_outbound_tail_refusal(&delivery.delivery_verdict)
-            {
+            if !is_outbound_tail_refusal(&delivery.delivery_verdict) {
+                if delivery.source_movement_seq.is_some() || delivery.delivery_scope_seq.is_some() {
+                    self.linked_refusals.push(movement.seq);
+                }
                 return;
             }
         }
         self.movements.push(movement);
+    }
+
+    fn fold_arrivals(
+        &self,
+        log: &DurableLog,
+        index: &mut octopus_ledger_index::ArrivalDedupIndex,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut remaining = self.movements.as_slice();
+        if let (Some(first), Some(last)) = (self.linked_refusals.first(), self.linked_refusals.last()) {
+            let end = Seq(last.0 + 1);
+            let mut linked = self.linked_refusals.iter().copied().peekable();
+            let mut result = Ok(());
+            log.try_scan_boot_range(*first..end, |movement| {
+                if linked.peek() != Some(&movement.seq) {
+                    return std::ops::ControlFlow::Continue(());
+                }
+                linked.next();
+                result = (|| {
+                    if index.watermark() < movement.seq.0 {
+                        let split = remaining.partition_point(|row| row.seq < movement.seq);
+                        let (preceding, rest) = remaining.split_at(split);
+                        index.catch_up_validated_projection(preceding, movement.seq.0)?;
+                        remaining = rest;
+                    }
+                    index.catch_up_movement_slice(std::slice::from_ref(&movement))
+                })();
+                if result.is_ok() { std::ops::ControlFlow::Continue(()) } else { std::ops::ControlFlow::Break(()) }
+            })?;
+            result?;
+            if index.watermark() != end.0 {
+                return Err(format!("durable refusal scan ends at {}, expected {}", index.watermark(), end.0).into());
+            }
+        }
+        index.catch_up_validated_projection(remaining, log.len() as u64)?;
+        Ok(())
     }
 
     fn note_run(&mut self, movement: &Movement) {
@@ -336,6 +374,8 @@ pub(crate) async fn run_daemon_on_dirs(
         DaemonBootEvent::LedgerProjected {
             movements: log.len(),
             unique_grants: log.validated_grant_count()?,
+            replay_rows: replay.movements.len(),
+            deferred_refusals: replay.linked_refusals.len(),
         },
     );
     octopus_file_storage::publication::create_dir_all(&run_records_dir)?;
@@ -384,14 +424,13 @@ pub(crate) async fn run_daemon_on_dirs(
     }
     publish_boot_event(&boot_events, DaemonBootEvent::CheckpointsReconstructing);
     hydrate_partial_checkpoint_rows(&log, &mut replay.movements)?;
-    embedded
-        .arrival_dedup
-        .lock()
-        .expect("arrival dedup index mutex is not poisoned")
-        .catch_up_validated_projection(&replay.movements, log.len() as u64)
-        .map_err(|error| -> Box<dyn std::error::Error> {
+    {
+        let mut index = embedded.arrival_dedup.lock().expect("arrival dedup index mutex is not poisoned");
+        replay.fold_arrivals(&log, &mut index).map_err(|error| -> Box<dyn std::error::Error> {
             format!("arrival dedup index failed to fold the durable ledger: {error}").into()
         })?;
+    }
+    drop(std::mem::take(&mut replay.linked_refusals));
 
     embedded
         .runtime
@@ -1438,11 +1477,10 @@ mod tests {
         let mut replay = BootReplay::default();
         let log =
             DurableLog::open_with_projection(&path, |movement| replay.observe(movement)).unwrap();
-        assert_eq!(replay.movements.len(), 4);
+        assert_eq!(replay.movements.len(), 2);
+        assert_eq!(replay.linked_refusals, [Seq(3), Seq(4)]);
         let mut dedup = ArrivalDedupIndex::new();
-        dedup
-            .catch_up_validated_projection(&replay.movements, log.len() as u64)
-            .unwrap();
+        replay.fold_arrivals(&log, &mut dedup).unwrap();
         assert_eq!(dedup.watermark(), 6);
         assert!(matches!(
             dedup
