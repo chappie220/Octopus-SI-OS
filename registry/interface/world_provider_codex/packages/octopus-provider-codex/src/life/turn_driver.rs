@@ -79,7 +79,7 @@ pub(crate) async fn drive_turn_with_retries_inner(
         Ok(recovered) => recovered,
         Err(error) if ctx.cancel.is_cancelled() => return Err(error),
         Err(error) => {
-            if close_refused_provider_handoff(ctx, descriptor, run, &turn, &handoff, driver, &error).await? {
+            if close_failed_provider_handoff(ctx, descriptor, run, &turn, &handoff, driver, &error).await? {
                 control.finish();
                 return Ok(());
             }
@@ -426,7 +426,7 @@ pub(crate) async fn drive_turn_with_retries_inner(
         let forwarded = match forwarded {
             Ok(forwarded) => forwarded,
             Err(error) => {
-                if close_refused_provider_handoff(ctx, descriptor, run, &turn, &handoff, driver, &error).await? {
+                if close_failed_provider_handoff(ctx, descriptor, run, &turn, &handoff, driver, &error).await? {
                     control.finish();
                     return Ok(());
                 }

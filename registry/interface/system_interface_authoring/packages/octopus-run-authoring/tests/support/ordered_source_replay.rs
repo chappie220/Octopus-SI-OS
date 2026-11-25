@@ -249,8 +249,50 @@ async fn exercise_interrupted_source_order(
             before_hash:authored.before_hash.clone(),after_hash:authored.after_hash.clone(),content:authored.content.clone(),
             patch:authored.patch.clone(),correlation_id:authored.correlation_id.clone()};
         let prior = make(&cold, &seed, &seed_output);
+        if detached {
+            let mut blocked = cold.clone();
+            blocked.ctx.movements_path = cold.var_dir.join("unadvanced-writer.jsonl");
+            blocked.hand_in_root = cold.hand_in_root.join("unadvanced-writer");
+            let binding = blocked.config.writer_run.as_ref().unwrap();
+            let writer_record = binding.initial_bytes().unwrap();
+            let writer = RunRecord::from_bytes(&writer_record).unwrap();
+            let role = |role| {
+                let template = blocked.config.checkpoint_for_role(role).unwrap();
+                writer.checkpoints.iter().find(|checkpoint| {
+                    writer.active_checkpoints.contains(&checkpoint.id)
+                        && checkpoint_record_matches_template(checkpoint, template, &writer.id)
+                }).unwrap().id.clone()
+            };
+            let mut rows = proof.clone();
+            let seq = rows.len() as u64;
+            let mut first = edit(&prior);
+            first.correlation_id = format!("provider-writer-run:{run}:1:1");
+            let call = checked_call(&blocked, &seed, &first, &blocked.hand_in_root);
+            edge(&blocked, &mut rows, &writer_record, &role(RunAuthoringCheckpointRole::AuthoringCall),
+                &call, prior.authoring_result_interface.clone(), MovementKind::InterfaceOutbound);
+            let result = InterfaceArtifactFile::write(blocked.var_dir.join("unadvanced-results"), &blocked.config.file_write_result_label,
+                &serde_json::to_vec(&serde_json::json!({"label":blocked.config.file_write_result_label,
+                    "tool":blocked.config.file_write_tool,"correlation_id":first.correlation_id,"ok":false,
+                    "error":{"code":"tool_effect_indeterminate","message":"process outcome unknown","details":{
+                        "source_movement_seq":seq,"failure_details":{"source_movement_seq":seq,
+                        "tool":blocked.config.file_write_tool,"effect_state":"in_flight_outcome_unknown"}}}})).unwrap()).unwrap();
+            edge(&blocked, &mut rows, &writer_record, &role(RunAuthoringCheckpointRole::AuthoringResult),
+                &result, blocked.ctx.interface.clone(), MovementKind::InterfaceOutbound);
+            blocked.session = ProviderHandoffSession::new(&blocked.ctx).unwrap();
+            let mut state = blocked.state.lock().await.clone();
+            state.run_record_bytes = seed.clone();
+            let refusal = blocked.spent_writer_checkpoint().unwrap().unwrap();
+            assert!(refusal.contains(&format!("after call {seq} returned result {}", seq + 1)));
+            let replacement = InterfaceArtifactFile::write(blocked.var_dir.join("unadvanced-output"),
+                "interface.artifact.output", br#"{"text":"a different output"}"#).unwrap();
+            let replacement = make(&blocked, &seed, &replacement);
+            assert!(matches!(blocked.install_with_writer_run(&mut state, &replacement).await,
+                Err(error) if error == refusal));
+            assert_eq!(std::fs::read(&blocked.run_path).unwrap(), seed);
+        }
         checked_call(&cold, &seed, &edit(&prior), &cold.hand_in_root);
         install_edit(&cold, &mut proof, &edit(&prior));
+        assert_eq!(cold.spent_writer_checkpoint().unwrap(), None);
         edge(&cold, &mut proof, prior.content.as_bytes(), &prior.pending_handoff.items[0].checkpoint.id,
             &seed_output, cold.config.worker.clone(), MovementKind::InterfaceArrival);
         let before = std::fs::read(&cold.run_path).unwrap();
