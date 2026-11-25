@@ -63,6 +63,9 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Exercise packaged runtime startup
+        run: python3 app/scripts/test-large-ledger-startup.py --runtime-root app/build/cli/runtime
+
       - name: Upload Linux ARM64 build
         uses: actions/upload-artifact@v4
         with:

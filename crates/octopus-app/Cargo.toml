@@ -39,6 +39,11 @@ notify.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process", "stdio"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util = { version = "0.3", default-features = false }
+signal-hook = { version = "0.4.6", default-features = false, features = ["extended-siginfo"] }
+signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tempfile = "3"
