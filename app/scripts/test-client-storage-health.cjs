@@ -92,6 +92,13 @@ test("runtime control requires interface_failures and reports exact life failure
     assert.equal((await host.probe()).ready, false);
     frame.interface_failures = [];
     assert.deepEqual((await host.probe()).interfaceFailures, []);
+    for (const phase of ["restoring_runtime", "starting_interfaces"]) {
+      frame.phase = phase;
+      const status = await host.probe();
+      assert.equal(status.phase, phase);
+      assert.equal(status.ready, false);
+    }
+    frame.phase = "ready";
     frame.stopping = "stop";
     assert.equal((await host.probe()).ready, false);
   } finally {

@@ -93,8 +93,8 @@ pub fn rebuild_daemon_state_from_durable_root(
     durable_root: &Path,
     base_tree: EeTree,
 ) -> Result<ResumedState, Box<dyn std::error::Error>> {
-    let log = DurableLog::open(durable_root.join("movements.jsonl"))?;
-    rebuild_daemon_state_from_movements(log.try_movements_from(Seq(0))?, base_tree)
+    let (_, movements) = DurableLog::open_with_boot_movements(durable_root.join("movements.jsonl"))?;
+    rebuild_daemon_state_from_movements(movements, base_tree)
 }
 
 fn rebuild_daemon_state_from_movements(
@@ -103,7 +103,7 @@ fn rebuild_daemon_state_from_movements(
 ) -> Result<ResumedState, Box<dyn std::error::Error>> {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for m in movements {
-        if let Some(run) = m.run() {
+        if let Some(run) = m.run().filter(|run| !seen.contains(run.as_str())) {
             seen.insert(run.as_str().to_string());
         }
     }
@@ -299,8 +299,12 @@ pub(crate) async fn run_daemon_on_dirs(
         },
     );
     tokio::task::yield_now().await;
-    let mut log = DurableLog::open(&movements_path)?;
-    let mut boot_movements = log.try_boot_movements_from(Seq(0))?;
+    let (mut log, mut boot_movements) =
+        tokio::task::spawn_blocking(move || DurableLog::open_with_boot_movements(movements_path))
+            .await??;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     publish_boot_event(
         &boot_events,
         DaemonBootEvent::LedgerProjected {
@@ -350,6 +354,9 @@ pub(crate) async fn run_daemon_on_dirs(
 
     publish_boot_event(&boot_events, DaemonBootEvent::CheckpointsReconstructing);
     tokio::task::yield_now().await;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     hydrate_partial_checkpoint_rows(&log, &mut boot_movements)?;
     embedded
         .arrival_dedup
@@ -370,6 +377,9 @@ pub(crate) async fn run_daemon_on_dirs(
 
     publish_boot_event(&boot_events, DaemonBootEvent::OutboundTailRecovering);
     tokio::task::yield_now().await;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     let hydrated_rows = hydrate_outbound_tail_recovery_rows(&log, &mut boot_movements)?;
     let recovered = recover_durable_checkpoint_outbound_tail(&mut log, &boot_movements)?;
     publish_boot_event(
@@ -412,6 +422,9 @@ pub(crate) async fn run_daemon_on_dirs(
 
     publish_boot_event(&boot_events, DaemonBootEvent::SpotlightOpening);
     tokio::task::yield_now().await;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     let spotlight = match octopus_ledger_index::LedgerSqliteIndex::open_healthy_from_movements(
         &durable_root.join("ledger-index.sqlite"),
         &log,
@@ -438,6 +451,9 @@ pub(crate) async fn run_daemon_on_dirs(
 
     publish_boot_event(&boot_events, DaemonBootEvent::StateRebuilding);
     tokio::task::yield_now().await;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     let resumed = rebuild_daemon_state_from_movements(boot_movements, embedded.live_ee_tree()?)?;
     if resumed.ee_tree.len() > 1 || !resumed.durable_runs.is_empty() {
         eprintln!(
@@ -454,6 +470,9 @@ pub(crate) async fn run_daemon_on_dirs(
             ee_scopes: resumed.ee_tree.len(),
         },
     );
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     let writer = crate::ledger_writer::LedgerWriter::new(log, spotlight).with_movement_wakes(movement_wakes);
     if let Some(ready) = ready {
         ready

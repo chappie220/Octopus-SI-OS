@@ -351,7 +351,17 @@ pub struct DurableLog {
 
 impl DurableLog {
     pub fn open(path: impl AsRef<Path>) -> LedgerResult<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_with_projection(path.as_ref(), |_| {})
+    }
+
+    pub fn open_with_boot_movements(path: impl AsRef<Path>) -> LedgerResult<(Self, Vec<Movement>)> {
+        let mut movements = Vec::new();
+        let log = Self::open_with_projection(path.as_ref(), |movement| movements.push(movement))?;
+        Ok((log, movements))
+    }
+
+    fn open_with_projection(path: &Path, collect: impl FnMut(Movement)) -> LedgerResult<Self> {
+        let path = path.to_path_buf();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| io_err(parent, &e))?;
@@ -363,7 +373,7 @@ impl DurableLog {
             grant_contents,
             clock,
             committed_len,
-        } = Self::index_rows(&path, &metadata)?;
+        } = Self::index_rows(&path, &metadata, collect)?;
         Self::discard_torn_tail(&path, committed_len)?;
         let file = OpenOptions::new()
             .create(true)
@@ -406,7 +416,11 @@ impl DurableLog {
         })
     }
 
-    fn index_rows(path: &Path, metadata: &DurableMovementDecoder) -> LedgerResult<RowIndex> {
+    fn index_rows(
+        path: &Path,
+        metadata: &DurableMovementDecoder,
+        mut collect: impl FnMut(Movement),
+    ) -> LedgerResult<RowIndex> {
         let mut offsets = Vec::new();
         let mut grant_contents = Vec::new();
         let mut clock = 0u64;
@@ -419,6 +433,7 @@ impl DurableLog {
                 clock = clock.max(movement.lamport.0);
                 offsets.push(offset);
                 grant_contents.push(grant_content);
+                collect(movement);
                 ControlFlow::Continue(())
             },
         )?;
@@ -1246,10 +1261,9 @@ mod tests {
         }
         drop(log);
 
-        let reopened = DurableLog::open(&path).unwrap();
+        let (reopened, projected) = DurableLog::open_with_boot_movements(&path).unwrap();
         assert_eq!(reopened.validated_grant_count().unwrap(), 1);
-        let projected = reopened.try_boot_movements_from(Seq(0)).unwrap();
-        assert_eq!(reopened.validated_grant_count().unwrap(), 1);
+        assert_eq!(projected, reopened.try_boot_movements_from(Seq(0)).unwrap());
         assert_eq!(projected.len(), 2);
         let projection = projected[0]
             .invocation_metadata
@@ -1695,7 +1709,8 @@ mod tests {
             "the un-terminated tail is dropped; committed rows survive replay"
         );
 
-        let mut log = DurableLog::open(&log_path).unwrap();
+        let (mut log, projected) = DurableLog::open_with_boot_movements(&log_path).unwrap();
+        assert_eq!(projected, committed);
         assert_eq!(log.len(), 2, "open recovered exactly the committed rows");
         let m2 = log.append(MovementDraft {
             trace: TraceId("t".into()),
