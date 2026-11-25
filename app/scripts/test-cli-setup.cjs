@@ -119,9 +119,24 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
     members: [{ registry_kind: "interface", owner: original.id, primary: true, configuration: [{ path: "interface.json", fields: [{ pointer: "/config/model", schema: { type: "string" } }] }] }],
   });
   const packageState = () => inspectLocalPackageInstallation({ ...first.packageRoots, packageId: "cli.fixture" });
+  const driverId = "driver.fixture_room";
+  const roomOwner = "worker_environment_kind/fixture_room";
+  const roomSource = path.join(first.packageRoots.sourceRegistryRoot, roomOwner);
+  const roomInstalled = path.join(first.packageRoots.activeRegistryRoot, roomOwner);
+  await json(path.join(roomSource, "worker_environment_kind.json"), { worker_environment_kind_id: "fixture_room" });
+  await fs.writeFile(path.join(roomSource, "file-writer"), "old writer", { mode: 0o755 });
+  await json(path.join(first.packageRoots.libraryRoot, "packages", `${driverId}.json`), {
+    schema: "octopus.local_package", schema_version: 1, id: driverId, version: "1.0.0",
+    product_kind: "driver", product_id: "fixture_room", release_status: "optional",
+    display: { name: "Fixture room", description: "CLI driver repair", developer: "Octopus", category: "worker_environment" },
+    members: [{ registry_kind: "worker_environment_kind", owner: "fixture_room", primary: true }],
+  });
   await fs.mkdir(first.packageRoots.activeRegistryRoot, { recursive: true });
   first.packageRoots.publication = second.packageRoots.publication = require("./support/native-publication.cjs").nativePublication();
   await installLocalPackages({ ...first.packageRoots, operationId: "cli_fixture_install_001", packageIds: ["cli.fixture"], expectedSourceDigests: { "cli.fixture": (await packageState()).source_digest } });
+  const driverState = await inspectLocalPackageInstallation({ ...first.packageRoots, packageId: driverId });
+  await installLocalPackages({ ...first.packageRoots, operationId: "cli_fixture_driver_install", packageIds: [driverId], expectedSourceDigests: { [driverId]: driverState.source_digest } });
+  await fs.writeFile(path.join(roomSource, "file-writer"), "new writer");
   await json(active, { ...original, config: { model: "selected" } });
   await json(source, { ...original, contract: 2 });
   await fs.writeFile(providerLife, "new executable");
@@ -136,6 +151,7 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
     assert.deepEqual(JSON.parse(await fs.readFile(active)), { ...original, config: { model: "selected" } });
     assert.equal((await packageState()).receipt_state, "valid");
     await assert.rejects(first.repairApplication({ applicationId: "cli.fixture", operationId: "cli_fixture_repair_live" }), /Stop the Octopus runtime/);
+    await assert.rejects(first.repairDriver({ driverId: "fixture_room", operationId: "cli_fixture_driver_live" }), /Stop the Octopus runtime/);
     assert.equal(await fs.readFile(installedLife, "utf8"), "old executable");
     assert.deepEqual(JSON.parse(await fs.readFile(pendingRecord)), { pending: "preserve" });
     await json(source, { ...original, contract: 3 });
@@ -153,6 +169,10 @@ process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmS
     if (current.pid) { process.kill(current.pid, "SIGTERM"); await waitStopped(first); }
   }
   assert.equal((await first.repairApplication({ applicationId: "cli.fixture", operationId: "cli_fixture_repair_stopped" })).changed, true);
+  assert.equal(await fs.readFile(path.join(roomInstalled, "file-writer"), "utf8"), "old writer");
+  assert.equal((await first.repairDriver({ driverId: "fixture_room", operationId: "cli_fixture_driver_stopped" })).changed, true);
+  assert.equal(await fs.readFile(path.join(roomInstalled, "file-writer"), "utf8"), "new writer");
+  assert.ok((await fs.stat(path.join(roomInstalled, "file-writer"))).mode & 0o111);
   assert.equal(await fs.readFile(installedLife, "utf8"), "new executable");
   assert.ok((await fs.stat(installedLife)).mode & 0o111);
   assert.deepEqual(JSON.parse(await fs.readFile(active)), { ...original, config: { model: "selected" }, contract: 3 });
