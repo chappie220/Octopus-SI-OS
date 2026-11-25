@@ -2,7 +2,7 @@ use crate::process_authority::linux::{
     FileAccess, FileSelector, LinuxProcessPolicy, CONTROL_SOCKET, MAX_REQUEST_BYTES,
 };
 use std::ffi::CString;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -103,7 +103,6 @@ impl LinuxLease {
             .map_err(|error| unavailable(error.to_string()))?;
         let mut reader = BufReader::new(owner);
         let mut response = String::new();
-        use std::io::Read;
         reader
             .by_ref()
             .take(4097)
@@ -140,7 +139,7 @@ impl LinuxLease {
         })
     }
 
-    pub(crate) fn configure(self: &Arc<Self>, command: &mut Command) {
+    pub(crate) fn configure(self: &Arc<Self>, command: &mut Command, diagnostics: Option<PipeWriter>) {
         let lease = Arc::clone(self);
         let request = format!("ATTACH {}\n", self.token).into_bytes();
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -153,40 +152,89 @@ impl LinuxLease {
             + 1) as libc::socklen_t;
         unsafe {
             command.pre_exec(move || {
-                let socket = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-                if socket < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let connected =
-                    libc::connect(socket, std::ptr::from_ref(&address).cast(), address_length);
-                if connected < 0 {
-                    let error = std::io::Error::last_os_error();
-                    libc::close(socket);
-                    return Err(error);
-                }
-                let sent = write_all(socket, &request, true);
-                let mut response = [0u8; 1];
-                let received = if sent.is_ok() {
-                    read_one(socket, &mut response)
-                } else {
-                    sent
-                };
-                libc::close(socket);
-                received?;
-                if response[0] != 0 {
-                    return Err(std::io::Error::from_raw_os_error(libc::EACCES));
-                }
-                change_profile(b"changeprofile unconfined")?;
+                let diagnostics = diagnostics.as_ref();
+                attach_child(&address, address_length, &request, diagnostics)?;
+                report_stage(diagnostics, b'U', change_profile(b"changeprofile unconfined"))?;
                 for directory in &lease.directories {
-                    prepare_directory(directory)?;
+                    report_stage(diagnostics, b'D', prepare_directory(directory))?;
                 }
-                change_profile(lease.profile.as_bytes())?;
+                report_stage(diagnostics, b'P', change_profile(lease.profile.as_bytes()))?;
                 if lease.no_new_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
+                    return report_stage(diagnostics, b'N', Err(std::io::Error::last_os_error()));
                 }
+                write_stage(diagnostics, b'X');
                 Ok(())
             });
         }
+    }
+}
+
+pub(crate) fn spawn_diagnostics() -> Option<(PipeReader, PipeWriter)> {
+    let (reader, writer) = std::io::pipe().ok()?;
+    if unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        return None;
+    }
+    Some((reader, writer))
+}
+
+pub(crate) fn describe_spawn_error(mut reader: PipeReader, error: std::io::Error) -> String {
+    let mut stage = [0];
+    let stage = match reader.read(&mut stage) {
+        Ok(1) => match stage[0] {
+            b'C' => "connecting the child to Linux process authority",
+            b'A' => "attaching the child to Linux process authority",
+            b'U' => "switching to the directory preparation profile",
+            b'D' => "preparing an authorized directory",
+            b'P' => "applying the prepared AppArmor profile",
+            b'N' => "setting no_new_privs",
+            b'X' => "launching the program after Linux authority setup",
+            _ => return error.to_string(),
+        },
+        _ => return error.to_string(),
+    };
+    format!("{error} (while {stage})")
+}
+
+fn report_stage(
+    diagnostic: Option<&PipeWriter>, stage: u8, result: std::io::Result<()>,
+) -> std::io::Result<()> {
+    if result.is_err() {
+        write_stage(diagnostic, stage);
+    }
+    result
+}
+
+fn write_stage(diagnostic: Option<&PipeWriter>, stage: u8) {
+    if let Some(diagnostic) = diagnostic {
+        unsafe { libc::write(diagnostic.as_raw_fd(), std::ptr::from_ref(&stage).cast(), 1) };
+    }
+}
+
+fn attach_child(
+    address: &libc::sockaddr_un,
+    address_length: libc::socklen_t,
+    request: &[u8],
+    diagnostics: Option<&PipeWriter>,
+) -> std::io::Result<()> {
+    unsafe {
+        let socket = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        if socket < 0 {
+            return report_stage(diagnostics, b'C', Err(std::io::Error::last_os_error()));
+        }
+        if libc::connect(socket, std::ptr::from_ref(address).cast(), address_length) < 0 {
+            let error = std::io::Error::last_os_error();
+            libc::close(socket);
+            return report_stage(diagnostics, b'C', Err(error));
+        }
+        let mut response = [0];
+        let received = write_all(socket, request, true)
+            .and_then(|_| read_one(socket, &mut response));
+        libc::close(socket);
+        report_stage(diagnostics, b'A', received)?;
+        if response[0] != 0 {
+            return report_stage(diagnostics, b'A', Err(std::io::Error::from_raw_os_error(libc::EACCES)));
+        }
+        Ok(())
     }
 }
 
@@ -278,6 +326,36 @@ unsafe fn read_one(fd: libc::c_int, byte: &mut [u8; 1]) -> std::io::Result<()> {
                     return Err(error);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_diagnostics_distinguish_setup_failure_from_exec_failure() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing-executable");
+        for (stage, errno, label) in [
+            (b'P', libc::EACCES, "applying the prepared AppArmor profile"),
+            (b'X', libc::ENOENT, "launching the program after Linux authority setup"),
+        ] {
+            let (reader, writer) = spawn_diagnostics().unwrap();
+            let mut command = Command::new(&missing);
+            unsafe {
+                command.pre_exec(move || {
+                    if stage == b'X' {
+                        write_stage(Some(&writer), stage);
+                        Ok(())
+                    } else {
+                        report_stage(Some(&writer), stage, Err(std::io::Error::from_raw_os_error(errno)))
+                    }
+                });
+            }
+            let error = command.spawn().unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+            assert!(describe_spawn_error(reader, error).contains(label));
         }
     }
 }
