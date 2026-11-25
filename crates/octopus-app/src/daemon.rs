@@ -352,11 +352,11 @@ pub(crate) async fn run_daemon_on_dirs(
         .into());
     }
 
-    publish_boot_event(&boot_events, DaemonBootEvent::CheckpointsReconstructing);
     tokio::task::yield_now().await;
     if cancel.is_cancelled() {
         return Ok(());
     }
+    publish_boot_event(&boot_events, DaemonBootEvent::CheckpointsReconstructing);
     hydrate_partial_checkpoint_rows(&log, &mut boot_movements)?;
     embedded
         .arrival_dedup
@@ -375,11 +375,11 @@ pub(crate) async fn run_daemon_on_dirs(
         })?;
     publish_boot_event(&boot_events, DaemonBootEvent::CheckpointsReconstructed);
 
-    publish_boot_event(&boot_events, DaemonBootEvent::OutboundTailRecovering);
     tokio::task::yield_now().await;
     if cancel.is_cancelled() {
         return Ok(());
     }
+    publish_boot_event(&boot_events, DaemonBootEvent::OutboundTailRecovering);
     let hydrated_rows = hydrate_outbound_tail_recovery_rows(&log, &mut boot_movements)?;
     let recovered = recover_durable_checkpoint_outbound_tail(&mut log, &boot_movements)?;
     publish_boot_event(
@@ -420,11 +420,11 @@ pub(crate) async fn run_daemon_on_dirs(
     .await?;
     boot_movements.extend(log.try_boot_movements_from(relay_start)?);
 
-    publish_boot_event(&boot_events, DaemonBootEvent::SpotlightOpening);
     tokio::task::yield_now().await;
     if cancel.is_cancelled() {
         return Ok(());
     }
+    publish_boot_event(&boot_events, DaemonBootEvent::SpotlightOpening);
     let spotlight = match octopus_ledger_index::LedgerSqliteIndex::open_healthy_from_movements(
         &durable_root.join("ledger-index.sqlite"),
         &log,
@@ -449,11 +449,11 @@ pub(crate) async fn run_daemon_on_dirs(
     );
     let _ = &trace_id;
 
-    publish_boot_event(&boot_events, DaemonBootEvent::StateRebuilding);
     tokio::task::yield_now().await;
     if cancel.is_cancelled() {
         return Ok(());
     }
+    publish_boot_event(&boot_events, DaemonBootEvent::StateRebuilding);
     let resumed = rebuild_daemon_state_from_movements(boot_movements, embedded.live_ee_tree()?)?;
     if resumed.ee_tree.len() > 1 || !resumed.durable_runs.is_empty() {
         eprintln!(

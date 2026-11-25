@@ -251,23 +251,33 @@ fn start_again() -> Result<(), Box<dyn std::error::Error>> {
     Err("restarting the runtime in place requires Unix process replacement".into())
 }
 
-#[cfg(unix)]
-async fn shutdown_signal() {
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                eprintln!("octopus: SIGTERM handler failed to register: {error}");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            let _ = result;
+#[cfg(target_os = "linux")]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = Option<String>>> {
+    use futures_util::StreamExt;
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::exfiltrator::WithOrigin;
+    let mut signals = signal_hook_tokio::SignalsInfo::<WithOrigin>::new([SIGINT, SIGTERM])?;
+    Ok(async move {
+        let origin = signals.next().await?;
+        let name = signal_hook::low_level::signal_name(origin.signal).unwrap_or("unknown signal");
+        Some(match origin.process {
+            Some(sender) => format!("{name} from pid {} (uid {})", sender.pid, sender.uid),
+            None => format!("{name} ({:?})", origin.cause),
+        })
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = Option<String>>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            event = interrupt.recv() => event.map(|()| "SIGINT".to_string()),
+            event = terminate.recv() => event.map(|()| "SIGTERM".to_string()),
         }
-        _ = terminate.recv() => {}
-    }
+    })
 }
 
 #[cfg(unix)]
@@ -307,8 +317,16 @@ fn survive_terminal_hangup(_log: &Path) -> Result<(), Box<dyn std::error::Error>
 }
 
 #[cfg(not(unix))]
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = Option<String>>> {
+    Ok(async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => Some("Ctrl+C".to_string()),
+            Err(error) => {
+                eprintln!("octopus: shutdown signal listener failed: {error}");
+                None
+            }
+        }
+    })
 }
 
 fn usage() -> Result<(), Box<dyn std::error::Error>> {
@@ -429,10 +447,14 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
     boot.stage("home", octopus_home.display());
     let cancel = CancellationToken::new();
     let cancel_for_signal = cancel.clone();
+    let shutdown = shutdown_signal().map_err(|error| {
+        std::io::Error::new(error.kind(), format!("cannot register shutdown signals: {error}"))
+    })?;
     let _shutdown_signal_task = tokio::spawn(async move {
-        shutdown_signal().await;
-        eprintln!("octopus: shutdown signal received — cancelling the daemon cleanly");
-        cancel_for_signal.cancel();
+        if let Some(signal) = shutdown.await {
+            eprintln!("octopus: shutdown signal received ({signal}) — cancelling the daemon cleanly");
+            cancel_for_signal.cancel();
+        }
     });
     let mut runtime_instance = runtime_instance::RuntimeInstance::acquire(&octopus_home)?;
     survive_terminal_hangup(&octopus_home.join("state").join("runtime-instance").join("output.log"))?;
@@ -594,9 +616,15 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
             };
             if !daemon_ready {
                 let daemon_result = daemon_task.await;
+                while let Ok(event) = daemon_boot_rx.try_recv() {
+                    report_daemon_boot_event(&mut boot, event);
+                }
                 activation_arrival_forwarder_task.abort();
                 return match daemon_result {
-                    Ok(Ok(())) => Ok(()),
+                    Ok(Ok(())) => {
+                        boot.stage("startup", "cancelled before interface discovery");
+                        Ok(())
+                    }
                     Ok(Err(error)) => Err(error.into()),
                     Err(error) => Err(std::io::Error::other(format!(
                         "daemon task failed during initialization cleanup: {error}"

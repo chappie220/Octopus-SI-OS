@@ -1,0 +1,53 @@
+name: test-linux-arm64-startup
+
+on:
+  push:
+    paths:
+      - '.github/workflows/test-linux-arm64-startup.yml'
+      - 'app/distribution/system-baseline.json'
+      - 'app/scripts/test-large-ledger-startup.py'
+      - 'Cargo.lock'
+      - 'crates/octopus-app/**'
+      - 'crates/octopus-ledger*/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  startup:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libsqlite3-dev
+      - name: Build ARM64 runtime
+        run: |
+          test "$(uname -m)" = aarch64
+          cargo build --locked --release -p octopus-app
+      - name: Exercise startup on ARM64
+        run: |
+          runtime="$(mktemp -d)"
+          mkdir "$runtime/bin"
+          install target/release/octopus "$runtime/bin/octopus"
+          node - "$runtime" <<'JS'
+          const path = require("node:path");
+          const { createRuntimePackager } = require("./app/scripts/runtime-package.cjs");
+          const repoRoot = process.cwd();
+          const appRoot = path.join(repoRoot, "app");
+          const outputRoot = process.argv[2];
+          createRuntimePackager({ repoRoot, appRoot, outputRoot }).copyRegistryBaseline(
+            path.join(repoRoot, "registry"), path.join(outputRoot, "registry"),
+            path.join(appRoot, "distribution", "system-baseline.json"),
+          );
+          JS
+          python3 app/scripts/test-large-ledger-startup.py --runtime-root "$runtime"
