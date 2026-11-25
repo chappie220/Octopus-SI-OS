@@ -1420,7 +1420,7 @@ impl LedgerTailReader {
         let interval_end = start
             .seq
             .saturating_add(AUTHORITATIVE_LEDGER_SCAN_MOVEMENT_BUDGET as u64);
-        let indexed_candidate_seq = self.spotlight.as_ref().and_then(|spotlight| {
+        let indexed_candidate_seq = self.spotlight.as_ref().filter(|_| start.offset < ledger_len).and_then(|spotlight| {
             let progress = spotlight.progress().ok()?;
             if progress.watermark <= start.seq
                 || progress.durable_end_offset < start.offset
@@ -1707,58 +1707,94 @@ impl LedgerTailReader {
         &self,
         own: &OwnOutboundMovement,
     ) -> Result<InterfaceInvocationEnvelope, String> {
-        let metadata = own.metadata()?;
-        let artifact = own.movement.artifact.clone().ok_or_else(|| {
+        capture_outbound_envelope(
+            &self.interface, &self.blobs_dir, self.host_io_limits, &own.movement, own.metadata()?,
+        )
+    }
+}
+
+/// Capture an exact outbound movement obtained from the durable ledger.
+pub fn replay_outbound_for_run(
+    ctx: &InterfaceLiftContext,
+    run: &octopus_descriptors::RunId,
+    movement: &Movement,
+) -> Result<Option<InterfaceInvocationEnvelope>, String> {
+    if movement.kind != MovementKind::InterfaceOutbound
+        || !matches!(&movement.from, Endpoint::Interface(_))
+        || !matches!(&movement.to, Endpoint::Interface(target) if target == &ctx.interface)
+    {
+        return Ok(None);
+    }
+    let metadata = movement.invocation_metadata.as_ref()
+        .and_then(|metadata| metadata.invocation())
+        .ok_or_else(|| format!("outbound movement seq {} has no invocation metadata", movement.seq.0))?;
+    let runtime = metadata.runtime().filter(|runtime| runtime.interface == ctx.interface)
+        .ok_or_else(|| format!("outbound movement seq {} carries mismatched runtime coordinates", movement.seq.0))?;
+    if &runtime.run != run {
+        return Ok(None);
+    }
+    capture_outbound_envelope(
+        &ctx.interface, &ctx.blobs_dir, ctx.required_host_io_limits()?, movement, metadata,
+    ).map(Some)
+}
+
+fn capture_outbound_envelope(
+    interface: &InterfaceId,
+    blobs_dir: &Path,
+    limits: InterfaceHostIoLimits,
+    movement: &Movement,
+    metadata: &InvocationMetadata,
+) -> Result<InterfaceInvocationEnvelope, String> {
+    let artifact = movement.artifact.clone().ok_or_else(|| {
+        format!(
+            "outbound movement seq {} for interface '{}' carries no artifact",
+            movement.seq.0,
+            interface.as_str()
+        )
+    })?;
+    let manifest_path = blobs_dir.join(artifact.content.to_hex());
+    let artifact_file = InterfaceArtifactFile::new(&manifest_path)
+        .map_err(|e| {
             format!(
-                "outbound movement seq {} for interface '{}' carries no artifact",
-                own.movement.seq.0,
-                self.interface.as_str()
+                "outbound artifact manifest blob '{}' cannot be opened as a manifest: {e}",
+                manifest_path.display()
             )
-        })?;
-        let manifest_path = self.blobs_dir.join(artifact.content.to_hex());
-        let artifact_file = InterfaceArtifactFile::new(&manifest_path)
-            .map_err(|e| {
-                format!(
-                    "outbound artifact manifest blob '{}' cannot be opened as a manifest: {e}",
-                    manifest_path.display()
-                )
-            })?
-            .with_payload_cache_root(&self.blobs_dir);
-        let captured = artifact_file
-            .read_bounded(
-                self.host_io_limits.max_manifest_bytes,
-                self.host_io_limits.max_payload_bytes,
-            )
-            .map_err(|error| {
-                format!(
-                    "outbound artifact manifest blob '{}' cannot be captured: {error}",
-                    manifest_path.display()
-                )
-            })?;
-        let artifact_file = InterfaceArtifactFile::from_captured_snapshot(
-            manifest_path.clone(),
-            captured.manifest_bytes,
-            captured.payload_bytes,
+        })?
+        .with_payload_cache_root(blobs_dir);
+    let captured = artifact_file
+        .read_bounded(
+            limits.max_manifest_bytes,
+            limits.max_payload_bytes,
         )
         .map_err(|error| {
             format!(
-                "outbound artifact manifest blob '{}' cannot be pinned as a captured carrier: {error}",
+                "outbound artifact manifest blob '{}' cannot be captured: {error}",
                 manifest_path.display()
             )
         })?;
-        let mut artifact_binding_payloads: ArtifactBindingPayloadSet = Vec::new();
-        for binding_ref in &metadata.artifact_binding_refs {
-            let binding_blob_path = self.blobs_dir.join(binding_ref.content.to_hex());
-            let bytes = resolve_artifact_binding_payload(&binding_blob_path, self.host_io_limits)?;
-            artifact_binding_payloads.push(ArtifactBindingPayload::new(binding_ref.clone(), bytes));
-        }
-        Ok(InterfaceInvocationEnvelope {
-            artifact,
-            artifact_file,
-            artifact_binding_payloads,
-            metadata: Some(metadata.clone()),
-        })
+    let artifact_file = InterfaceArtifactFile::from_captured_snapshot(
+        manifest_path.clone(),
+        captured.manifest_bytes,
+        captured.payload_bytes,
+    )
+    .map_err(|error| {
+        format!(
+            "outbound artifact manifest blob '{}' cannot be pinned as a captured carrier: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let mut artifact_binding_payloads: ArtifactBindingPayloadSet = Vec::new();
+    for binding_ref in &metadata.artifact_binding_refs {
+        let binding_blob_path = blobs_dir.join(binding_ref.content.to_hex());
+        let bytes = resolve_artifact_binding_payload(&binding_blob_path, limits)?;
+        artifact_binding_payloads.push(ArtifactBindingPayload::new(binding_ref.clone(), bytes));
     }
+    Ok(InterfaceInvocationEnvelope {
+        artifact,
+        artifact_file,
+        artifact_binding_payloads,
+        metadata: Some(metadata.clone()),
+    })
 }
 
 #[cfg(not(target_os = "macos"))]

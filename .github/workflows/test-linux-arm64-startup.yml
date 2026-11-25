@@ -55,10 +55,11 @@ jobs:
           JS
           python3 app/scripts/test-large-ledger-startup.py --runtime-root "$runtime"
       - name: Exercise provider ledger fallback on ARM64
-        run: >-
-          cargo test --locked --release -p octopus-run-authoring --lib
-          ledger_rows::tests::row_index_retains_outbound_evidence_across_a_refusal_heavy_prefix
-          -- --exact
+        run: |
+          cargo test --locked --release -p octopus-run-authoring --lib \
+            ledger_rows::tests::row_index_retains_outbound_evidence_across_a_refusal_heavy_prefix -- --exact
+          cargo test --locked --release -p octopus-run-authoring --lib \
+            tests::writer_edge_candidates_keep_unattributed_rows_and_validate_ledger_bytes -- --exact
       - name: Exercise Linux child launch diagnostics on ARM64
         run: >-
           cargo test --locked --release -p octopus-verifiers --lib

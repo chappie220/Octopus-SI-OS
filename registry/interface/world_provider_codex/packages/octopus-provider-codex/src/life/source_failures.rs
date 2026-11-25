@@ -608,24 +608,19 @@ pub(crate) fn replay_provider_source(
     run: &RunId,
     source_movement_seq: u64,
 ) -> Result<Option<QueuedTurn>, String> {
-    let mut replay = LedgerReplayReader::open(ctx)?;
-    while let Some(batch) = replay.read_batch(PROVIDER_CONTROL_READ_BATCH_LIMIT)? {
-        for own in batch {
-            if own.movement.seq.0 < source_movement_seq {
-                continue;
-            }
-            if own.movement.seq.0 > source_movement_seq
-                || own.metadata()?.runtime.as_ref().map(|runtime| &runtime.run) != Some(run)
-            {
-                return Ok(None);
-            }
-            return Ok(Some(QueuedTurn {
-                envelope: replay.envelope(&own)?,
-                seq: source_movement_seq,
-            }));
-        }
+    use octopus_run_authoring::{CheckedRunEvidenceReader, FileCheckedRunReader};
+    let evidence = provider_ledger_evidence(ctx)?;
+    let mut reader = FileCheckedRunReader::open(&evidence, source_movement_seq.checked_sub(1))?;
+    if reader.next_sequence() != source_movement_seq {
+        return Ok(None);
     }
-    Ok(None)
+    let Some(movement) = reader.movement(source_movement_seq)? else {
+        return Ok(None);
+    };
+    Ok(replay_outbound_for_run(ctx, run, &movement)?.map(|envelope| QueuedTurn {
+        envelope,
+        seq: source_movement_seq,
+    }))
 }
 
 pub(crate) async fn backoff_or_give_up(

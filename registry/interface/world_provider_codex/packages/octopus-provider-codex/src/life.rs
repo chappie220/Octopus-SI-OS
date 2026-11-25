@@ -11,7 +11,7 @@ use octopus_ledger::{ArtifactRef, ContentHash, Endpoint, MovementKind};
 use octopus_ledger_store::DurableMovementDecoder;
 use octopus_login::AuthManager;
 use octopus_model_context_render::model_hidden_tool_names;
-use octopus_world_pyecho_life_runtime::{LedgerReplayReader, LedgerTailReader};
+use octopus_world_pyecho_life_runtime::{LedgerTailReader, replay_outbound_for_run};
 
 use crate::config::{
     CodexInstanceConfig, auth_manager_from_provider_home,

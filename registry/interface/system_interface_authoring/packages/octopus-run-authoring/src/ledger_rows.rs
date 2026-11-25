@@ -304,6 +304,30 @@ impl LedgerRows {
         Ok(state.outbounds.range(..upper)
             .filter_map(|(&seq, row)| predicate(row).then_some(seq)).collect())
     }
+
+    pub(crate) fn outbound_boundaries(
+        &self, file: LedgerFile, from: u64, offset: u64, predicate: impl Fn(&OutboundRow) -> bool,
+    ) -> Result<Vec<(octopus_ledger_index::IndexedMovementRowRange, ContentHash)>, String> {
+        let state = self.state()?;
+        if state.file != Some(file) || from >= state.boundaries.len() as u64 {
+            return Ok(Vec::new());
+        }
+        if state.start(from as usize) != Some(offset) {
+            return Ok(Vec::new());
+        }
+        let last = state.boundaries.len() as u64 - 1;
+        let sequences = state.outbounds.range(from..last)
+            .filter_map(|(&seq, row)| predicate(row).then_some(seq))
+            .chain(std::iter::once(last));
+        sequences.map(|seq| {
+            let index = seq as usize;
+            let boundary = &state.boundaries[index];
+            let start_offset = state.start(index).ok_or("ledger row lost its preceding boundary")?;
+            Ok((octopus_ledger_index::IndexedMovementRowRange {
+                seq, start_offset, end_offset: boundary.end,
+            }, boundary.digest))
+        }).collect()
+    }
 }
 
 pub(crate) struct OutboundPrefix {

@@ -1549,6 +1549,34 @@
         }
     }
 
+    #[test]
+    fn provider_source_replay_uses_exact_sequence_and_run_with_or_without_sqlite() {
+        for indexed in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let descriptor = descriptor();
+            let ctx = context(temp.path(), &descriptor);
+            let run = RunId::new("run-a");
+            let payload = artifact(temp.path(), "operator.message", json!({"text":"exact input"}));
+            let reference = cache_artifact(&ctx, &payload);
+            let outbound = |seq, target| movement(
+                seq, MovementKind::InterfaceOutbound,
+                Endpoint::Interface(InterfaceId::new("world_operator")),
+                Endpoint::Interface(target), reference.clone(),
+            );
+            write_movements(&ctx.movements_path, &[
+                outbound(0, InterfaceId::new("world_other_provider")),
+                outbound(1, descriptor.id.clone()),
+            ]);
+            if !indexed { std::fs::remove_file(&ctx.ledger_index_path).unwrap(); }
+            let replay = replay_provider_source(&ctx, &run, 1).unwrap().unwrap();
+            assert_eq!(replay.seq, 1);
+            assert_eq!(replay.envelope.artifact, reference);
+            assert!(replay_provider_source(&ctx, &run, 0).unwrap().is_none());
+            assert!(replay_provider_source(&ctx, &run, 2).unwrap().is_none());
+            assert!(replay_provider_source(&ctx, &RunId::new("other-run"), 1).unwrap().is_none());
+        }
+    }
+
     #[tokio::test]
     async fn admission_scan_waits_for_a_complete_concurrent_jsonl_tail() {
         let temp = tempfile::tempdir().unwrap();

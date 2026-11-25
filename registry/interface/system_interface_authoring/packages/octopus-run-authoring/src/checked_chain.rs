@@ -154,6 +154,13 @@ impl<'a> FileCheckedRunReader<'a> {
 
     pub fn next_sequence(&self) -> u64 { self.next_seq }
 
+    pub fn offset_in(&mut self, file: &std::fs::File) -> Result<u64, String> {
+        if ledger_rows::LedgerFile::of(file)? != self.ledger {
+            return Err("checked authoring cursor belongs to a different ledger".into());
+        }
+        self.reader.stream_position().map_err(|error| error.to_string())
+    }
+
     pub(crate) fn indexed_outbound_edges(
         &mut self, edges: &[(&InterfaceId, &InterfaceId)],
     ) -> Result<Option<std::collections::VecDeque<octopus_ledger_index::IndexedMovementRowRange>>, String> {
@@ -193,7 +200,34 @@ impl<'a> FileCheckedRunReader<'a> {
             Some(selected.into())
         })();
         self.reader.seek(std::io::SeekFrom::Start(start)).map_err(|error| error.to_string())?;
-        Ok(selected)
+        if selected.is_some() {
+            return Ok(selected);
+        }
+        let cached = self.rows.outbound_boundaries(self.ledger, self.next_seq, start, |row| {
+            matches!((&row.from, &row.to), (Endpoint::Interface(from), Endpoint::Interface(to))
+                if edges.contains(&(from, to)))
+        })?;
+        if cached.is_empty() {
+            return Ok(None);
+        }
+        let verified = (|| {
+            let current_len = self.reader.get_ref().metadata().ok()?.len();
+            if cached.last()?.0.end_offset > current_len || cached.first()?.0.start_offset < start {
+                return None;
+            }
+            for (range, digest) in &cached {
+                self.reader.seek(std::io::SeekFrom::Start(range.start_offset)).ok()?;
+                let BoundedLedgerRow::Complete(bytes) = read_bounded_ledger_row(
+                    &mut self.reader, self.evidence.max_control_frame_bytes,
+                ).ok()? else { return None; };
+                if self.reader.stream_position().ok()? != range.end_offset || ContentHash::of_bytes(&bytes) != *digest {
+                    return None;
+                }
+            }
+            Some(cached.into_iter().map(|(range, _)| range).collect())
+        })();
+        self.reader.seek(std::io::SeekFrom::Start(start)).map_err(|error| error.to_string())?;
+        Ok(verified)
     }
 
     pub(crate) fn movement_with_grant_if(
