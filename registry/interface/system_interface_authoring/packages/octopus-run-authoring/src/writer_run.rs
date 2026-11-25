@@ -1302,14 +1302,13 @@ fn history(
     };
     let mut reader = FileCheckedRunReader::open(&evidence, None)?.with_provider_context(ctx);
     if let Some((start, end, hash)) = current.cursor {
-        if reader
+        let length = reader
             .reader
             .get_ref()
             .metadata()
             .map_err(|e| e.to_string())?
-            .len()
-            < end
-        {
+            .len();
+        if length < end {
             return Err("writer evidence ledger was truncated".into());
         }
         reader
@@ -1325,6 +1324,9 @@ fn history(
             || reader.reader.stream_position().map_err(|e| e.to_string())? != end
         {
             return Err("writer evidence boundary changed".into());
+        }
+        if length == end {
+            return Ok(current);
         }
         reader.next_seq = current.next_seq;
     }
@@ -1913,6 +1915,7 @@ impl ProviderOutputHandoff {
         let mut planned = authored.clone();
         let mut known: Option<(String, InterfaceArtifactFile, OrderedArguments, u64)> = None;
         let mut submitted = None;
+        let mut changes = None;
         loop {
             if self.ctx.cancel.is_cancelled() {
                 return Err("provider ordered file write was cancelled while it awaited its admitted result".into());
@@ -2059,10 +2062,10 @@ impl ProviderOutputHandoff {
                 submitted = Some(verdict);
                 continue;
             }
-            tokio::select! {
-                _ = self.ctx.cancel.cancelled() => {}
-                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            if changes.is_none() {
+                changes = Some(LedgerTailReader::open_named(&self.ctx, "writer-result-evidence")?);
             }
+            changes.as_mut().unwrap().wait_for_change(&self.ctx.cancel).await?;
         }
     }
 }

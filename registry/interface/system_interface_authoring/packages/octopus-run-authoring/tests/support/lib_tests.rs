@@ -310,6 +310,14 @@
         reader.reader.seek(std::io::SeekFrom::Start(selected[0].start_offset)).unwrap();
         reader.next_seq = selected[0].seq;
         assert!(reader.movement(1).unwrap().unwrap().invocation_metadata.is_none());
+        let moved_index = dir.path().join("unused.sqlite");
+        std::fs::rename(&index_path, &moved_index).unwrap();
+        let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+        reader.project_through(3).unwrap();
+        let mut replay = FileCheckedRunReader::open(&evidence, None).unwrap();
+        let cached = replay.indexed_outbound_edges(&[(&source, &door)]).unwrap().unwrap();
+        assert_eq!(cached, selected);
+        std::fs::rename(&moved_index, &index_path).unwrap();
         let mut bytes = ledger.into_bytes();
         bytes[selected[0].start_offset as usize] = b'!';
         std::fs::write(&path, bytes).unwrap();
