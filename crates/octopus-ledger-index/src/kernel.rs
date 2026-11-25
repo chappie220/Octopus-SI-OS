@@ -20,6 +20,8 @@ pub enum LedgerIndexError {
     LogBehindIndex { watermark: u64, log_len: u64 },
     #[error("movement log returned seq {got} where {expected} was expected (non-contiguous tail)")]
     NonContiguousTail { expected: u64, got: u64 },
+    #[error("movement projection returned seq {seq} outside the ordered range {start}..{end}")]
+    UnorderedProjection { seq: u64, start: u64, end: u64 },
     #[error("interface-arrival movement for run '{run}' has no metadata.runtime.checkpoint")]
     MalformedArrivalMetadata { run: String },
     #[error(
@@ -173,6 +175,38 @@ impl ArrivalDedupIndex {
         for movement in movements {
             self.catch_up_movement(movement)?;
         }
+        Ok(())
+    }
+
+    /// Fold an ordered subset of the validated ledger prefix ending at `log_len`.
+    /// The caller must include every row that can change the arrival projection.
+    pub fn catch_up_validated_projection(
+        &mut self,
+        movements: &[Movement],
+        log_len: u64,
+    ) -> Result<(), LedgerIndexError> {
+        let mut next = self.watermark;
+        if log_len < next {
+            return Err(LedgerIndexError::LogBehindIndex {
+                watermark: next,
+                log_len,
+            });
+        }
+        for movement in movements {
+            let seq = movement.seq.0;
+            if seq < next || seq >= log_len {
+                return Err(LedgerIndexError::UnorderedProjection {
+                    seq,
+                    start: next,
+                    end: log_len,
+                });
+            }
+            next = seq + 1;
+        }
+        for movement in movements {
+            self.note(movement);
+        }
+        self.watermark = log_len;
         Ok(())
     }
 

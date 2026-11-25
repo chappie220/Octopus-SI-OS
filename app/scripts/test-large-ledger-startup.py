@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import resource
 import signal
 import socket
 import sqlite3
@@ -13,6 +14,7 @@ import time
 
 ROW_COUNT = 896_035
 STARTUP_TIMEOUT = 120
+MAX_RUNTIME_RSS_MIB = 256
 
 
 def write_ledger(path):
@@ -109,12 +111,18 @@ def exercise_runtime(runtime, home, name, target_phase):
         assert f"SIGTERM from pid {os.getpid()} (uid {os.getuid()})" in output, output
         if target_phase == "ready":
             assert f"{ROW_COUNT} movements indexed" in output, output
+            assert "1 durable run(s)" in output, output
             assert "discovering descriptor-owned life processes" in output, output
         else:
             assert "cancelled before interface discovery" in output, output
             assert "discovering descriptor-owned life processes" not in output, output
             assert "checking durable outbound tail" not in output, output
-        print(f"{name}: reached {target_phase} in {elapsed:.2f}s", flush=True)
+        peak_mib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+        assert peak_mib <= MAX_RUNTIME_RSS_MIB, (
+            f"{name}: runtime peak RSS {peak_mib:.1f} MiB exceeded {MAX_RUNTIME_RSS_MIB} MiB"
+        )
+        print(f"{name}: reached {target_phase} in {elapsed:.2f}s, "
+              f"runtime peak RSS across boots so far {peak_mib:.1f} MiB", flush=True)
     except Exception:
         print(log_path.read_text(), flush=True)
         raise
@@ -131,7 +139,10 @@ def main():
         original = ledger_digest(ledger)
         exercise_runtime(runtime, home, "cold-index", "ready")
         with sqlite3.connect((ledger.parent / "ledger-index.sqlite").as_uri() + "?mode=ro", uri=True) as index:
-            assert index.execute("SELECT COUNT(*) FROM movements").fetchone()[0] == ROW_COUNT
+            assert index.execute("""
+                SELECT COUNT(*) FROM movements
+                WHERE kind = 'DeliveryRefused' AND runtime_run = 'run_writer_fixture'
+            """).fetchone()[0] == ROW_COUNT
         exercise_runtime(runtime, home, "warm-index", "ready")
         exercise_runtime(runtime, home, "cancel-during-replay", "restoring_runtime")
         assert ledger_digest(ledger) == original

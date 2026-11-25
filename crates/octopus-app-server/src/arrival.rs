@@ -377,6 +377,18 @@ fn record_runtime_outbound_artifact_refusals(
     Ok(movements)
 }
 
+const OUTBOUND_TAIL_REFUSAL_REASON: RefusedReason = RefusedReason::Policy;
+
+pub fn is_outbound_tail_refusal(verdict: &DeliveryVerdict) -> bool {
+    matches!(
+        verdict,
+        DeliveryVerdict::Refused {
+            reason: OUTBOUND_TAIL_REFUSAL_REASON,
+            ..
+        }
+    )
+}
+
 fn outbound_policy_refusal(
     run: &RunId,
     checkpoint: &CheckpointId,
@@ -398,7 +410,7 @@ fn outbound_policy_refusal(
         )));
     }
     Ok(DeliveryVerdict::refused(
-        RefusedReason::Policy,
+        OUTBOUND_TAIL_REFUSAL_REASON,
         serde_json::json!({
             "code": "policy.interface_binding_denied",
             "run": run,
@@ -501,7 +513,9 @@ fn existing_durable_tail_movement(
         MovementKind::InterfaceOutbound if metadata.invocation().is_some() => {
             DurableTailMovementKind::Outbound
         }
-        MovementKind::DeliveryRefused if metadata.delivery_verdict().is_some() => {
+        MovementKind::DeliveryRefused
+            if metadata.delivery_verdict().is_some_and(is_outbound_tail_refusal) =>
+        {
             DurableTailMovementKind::Refusal
         }
         _ => return None,

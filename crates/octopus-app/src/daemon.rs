@@ -1,6 +1,8 @@
 use notify::Watcher;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use octopus_app_server::arrival::is_outbound_tail_refusal;
 use octopus_app_server::{
     EmbeddedRuntime, InterfaceArtifactArrivalAdmissionError, InterfaceArtifactFile,
     SharedBlobHandle, SharedBlobs, SpineRootConfig, admit_interface_artifact_arrival,
@@ -15,7 +17,9 @@ pub use octopus_interface_transport::{SystemInterfaceEmission, SystemInterfaceEm
 use octopus_interfaces::{DeliveryVerdict, RefusedReason};
 #[cfg(test)]
 use octopus_ledger::ArtifactRef;
-use octopus_ledger::{Endpoint, InMemoryLog, Movement, MovementKind, MovementLog, Seq, TraceId};
+use octopus_ledger::{
+    Endpoint, InMemoryLog, Movement, MovementKind, MovementLog, MovementMetadata, Seq, TraceId,
+};
 #[cfg(test)]
 use octopus_ledger_store::DurableBlobs;
 use octopus_ledger_store::DurableLog;
@@ -88,30 +92,47 @@ pub struct ResumedState {
     pub durable_runs: Vec<RunId>,
 }
 
+#[derive(Default)]
+struct BootReplay {
+    movements: Vec<Movement>,
+    runs: BTreeSet<RunId>,
+}
+
+impl BootReplay {
+    fn observe(&mut self, movement: Movement) {
+        self.note_run(&movement);
+        if let (MovementKind::DeliveryRefused, Some(MovementMetadata::Delivery(delivery))) =
+            (&movement.kind, &movement.invocation_metadata)
+        {
+            if delivery.source_movement_seq.is_none()
+                && delivery.delivery_scope_seq.is_none()
+                && !is_outbound_tail_refusal(&delivery.delivery_verdict)
+            {
+                return;
+            }
+        }
+        self.movements.push(movement);
+    }
+
+    fn note_run(&mut self, movement: &Movement) {
+        if let Some(run) = movement.run().filter(|run| !self.runs.contains(*run)) {
+            self.runs.insert(run.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 pub fn rebuild_daemon_state_from_durable_root(
     durable_root: &Path,
     base_tree: EeTree,
 ) -> Result<ResumedState, Box<dyn std::error::Error>> {
-    let (_, movements) = DurableLog::open_with_boot_movements(durable_root.join("movements.jsonl"))?;
-    rebuild_daemon_state_from_movements(movements, base_tree)
-}
-
-fn rebuild_daemon_state_from_movements(
-    movements: impl IntoIterator<Item = octopus_ledger::Movement>,
-    base_tree: EeTree,
-) -> Result<ResumedState, Box<dyn std::error::Error>> {
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for m in movements {
-        if let Some(run) = m.run().filter(|run| !seen.contains(run.as_str())) {
-            seen.insert(run.as_str().to_string());
-        }
-    }
-    let durable_runs: Vec<RunId> = seen.into_iter().map(|r| RunId::new(&r)).collect();
-
+    let mut replay = BootReplay::default();
+    DurableLog::open_with_projection(&durable_root.join("movements.jsonl"), |movement| {
+        replay.note_run(&movement);
+    })?;
     Ok(ResumedState {
         ee_tree: base_tree,
-        durable_runs,
+        durable_runs: replay.runs.into_iter().collect(),
     })
 }
 
@@ -299,16 +320,21 @@ pub(crate) async fn run_daemon_on_dirs(
         },
     );
     tokio::task::yield_now().await;
-    let (mut log, mut boot_movements) =
-        tokio::task::spawn_blocking(move || DurableLog::open_with_boot_movements(movements_path))
-            .await??;
+    let (mut log, mut replay) = tokio::task::spawn_blocking(move || {
+        let mut replay = BootReplay::default();
+        let log = DurableLog::open_with_projection(&movements_path, |movement| {
+            replay.observe(movement);
+        })?;
+        Ok::<_, octopus_ledger::LedgerError>((log, replay))
+    })
+    .await??;
     if cancel.is_cancelled() {
         return Ok(());
     }
     publish_boot_event(
         &boot_events,
         DaemonBootEvent::LedgerProjected {
-            movements: boot_movements.len(),
+            movements: log.len(),
             unique_grants: log.validated_grant_count()?,
         },
     );
@@ -357,19 +383,19 @@ pub(crate) async fn run_daemon_on_dirs(
         return Ok(());
     }
     publish_boot_event(&boot_events, DaemonBootEvent::CheckpointsReconstructing);
-    hydrate_partial_checkpoint_rows(&log, &mut boot_movements)?;
+    hydrate_partial_checkpoint_rows(&log, &mut replay.movements)?;
     embedded
         .arrival_dedup
         .lock()
         .expect("arrival dedup index mutex is not poisoned")
-        .catch_up_movement_slice(&boot_movements)
+        .catch_up_validated_projection(&replay.movements, log.len() as u64)
         .map_err(|error| -> Box<dyn std::error::Error> {
             format!("arrival dedup index failed to fold the durable ledger: {error}").into()
         })?;
 
     embedded
         .runtime
-        .reconstruct_spent_checkpoints_from_movements(&boot_movements)
+        .reconstruct_spent_checkpoints_from_movements(&replay.movements)
         .map_err(|error| -> Box<dyn std::error::Error> {
             format!("runtime failed to reconstruct checkpoint admissions: {error}").into()
         })?;
@@ -380,8 +406,8 @@ pub(crate) async fn run_daemon_on_dirs(
         return Ok(());
     }
     publish_boot_event(&boot_events, DaemonBootEvent::OutboundTailRecovering);
-    let hydrated_rows = hydrate_outbound_tail_recovery_rows(&log, &mut boot_movements)?;
-    let recovered = recover_durable_checkpoint_outbound_tail(&mut log, &boot_movements)?;
+    let hydrated_rows = hydrate_outbound_tail_recovery_rows(&log, &mut replay.movements)?;
+    let recovered = recover_durable_checkpoint_outbound_tail(&mut log, &replay.movements)?;
     publish_boot_event(
         &boot_events,
         DaemonBootEvent::OutboundTailRecovered {
@@ -399,7 +425,9 @@ pub(crate) async fn run_daemon_on_dirs(
                 format!("arrival dedup index failed to fold recovered outbound tail: {error}")
                     .into()
             })?;
-        boot_movements.extend(recovered);
+        for movement in recovered {
+            replay.observe(movement);
+        }
     }
 
     let (run_changes_tx, run_changes) = tokio::sync::mpsc::unbounded_channel();
@@ -415,20 +443,20 @@ pub(crate) async fn run_daemon_on_dirs(
         &mut log,
         &mut relay_blobs,
         embedded.arrival_dedup.clone(),
-        &boot_movements,
+        &replay.movements,
     )
     .await?;
-    boot_movements.extend(log.try_boot_movements_from(relay_start)?);
+    drop(std::mem::take(&mut replay.movements));
+    log.try_scan_boot_movements(relay_start, |movement| replay.note_run(&movement))?;
 
     tokio::task::yield_now().await;
     if cancel.is_cancelled() {
         return Ok(());
     }
     publish_boot_event(&boot_events, DaemonBootEvent::SpotlightOpening);
-    let spotlight = match octopus_ledger_index::LedgerSqliteIndex::open_healthy_from_movements(
+    let spotlight = match octopus_ledger_index::LedgerSqliteIndex::open_healthy(
         &durable_root.join("ledger-index.sqlite"),
         &log,
-        &boot_movements,
     ) {
         Ok(index) => Some(index),
         Err(error) => {
@@ -454,7 +482,10 @@ pub(crate) async fn run_daemon_on_dirs(
         return Ok(());
     }
     publish_boot_event(&boot_events, DaemonBootEvent::StateRebuilding);
-    let resumed = rebuild_daemon_state_from_movements(boot_movements, embedded.live_ee_tree()?)?;
+    let resumed = ResumedState {
+        ee_tree: embedded.live_ee_tree()?,
+        durable_runs: replay.runs.into_iter().collect(),
+    };
     if resumed.ee_tree.len() > 1 || !resumed.durable_runs.is_empty() {
         eprintln!(
             "run_daemon: RESUMED prior state from the durable ledger alone — {} EE scope(s), {} prior \
@@ -900,19 +931,10 @@ fn hydrate_outbound_tail_recovery_rows(
         }
     }
     for seq in &selected {
-        let index = usize::try_from(seq.0)
-            .map_err(|_| format!("durable movement seq {} exceeds usize", seq.0))?;
-        let slot = movements
-            .get_mut(index)
-            .ok_or_else(|| format!("durable movement seq {} has no boot projection slot", seq.0))?;
-        if slot.seq != *seq {
-            return Err(format!(
-                "durable boot projection slot {} contains seq {}",
-                index, slot.seq.0
-            )
-            .into());
-        }
-        *slot = log
+        let index = movements
+            .binary_search_by_key(seq, |movement| movement.seq)
+            .map_err(|_| format!("durable movement seq {} has no boot projection slot", seq.0))?;
+        movements[index] = log
             .try_movement_at(*seq)?
             .ok_or_else(|| format!("durable movement seq {} disappeared", seq.0))?;
     }
@@ -1192,6 +1214,18 @@ mod tests {
         outbounds: &[(&InterfaceId, &InvocationMetadata)],
     ) -> (DurableLog, Vec<Movement>) {
         let mut log = DurableLog::open(path).unwrap();
+        log.append(octopus_ledger::MovementDraft {
+            trace: trace.clone(),
+            kind: MovementKind::DeliveryRefused,
+            from: Endpoint::Interface(source.clone()),
+            to: Endpoint::Interface(source.clone()),
+            artifact: Some(artifact.clone()),
+            invocation_metadata: Some(
+                DeliveryVerdict::refused(RefusedReason::CheckpointSpent, serde_json::Value::Null)
+                    .into(),
+            ),
+            causal_floor: None,
+        });
         let mut floor = None;
         for _ in 0..arrival_count {
             floor = Some(
@@ -1211,9 +1245,10 @@ mod tests {
             );
         }
         drop(log);
-        let log = DurableLog::open(path).unwrap();
-        let movements = log.try_boot_movements_from(Seq(0)).unwrap();
-        (log, movements)
+        let mut replay = BootReplay::default();
+        let log = DurableLog::open_with_projection(path, |movement| replay.observe(movement))
+            .unwrap();
+        (log, replay.movements)
     }
 
     #[test]
@@ -1250,7 +1285,7 @@ mod tests {
         let recovered = recover_durable_checkpoint_outbound_tail(&mut log, &movements).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].to, Endpoint::Interface(target_b.clone()));
-        assert_eq!(log.len(), 3);
+        assert_eq!(log.len(), 4);
 
         let duplicates_path = dir.path().join("duplicates/movements.jsonl");
         let (mut log, mut movements) = projected_tail_log(
@@ -1304,7 +1339,7 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].to, Endpoint::Interface(target_a.clone()));
         assert_eq!(projected_grant_tools(&recovered[0]), ["tool.tail_recovery"]);
-        assert_eq!(log.len(), 3);
+        assert_eq!(log.len(), 4);
 
         let complete_path = dir.path().join("complete/movements.jsonl");
         let (mut log, mut movements) = projected_tail_log(
@@ -1331,6 +1366,100 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn boot_replay_preserves_linked_refusal_receipts() {
+        use octopus_ledger::{ArrivalFanoutMetadata, ArrivalFanoutScope, DeliveryMetadata};
+        use octopus_ledger_index::{ArrivalDedupIndex, RelayArrivalState, RetainedArrivalState};
+
+        let run = RunId::new("run_relay");
+        let checkpoint = CheckpointId::new("checkpoint_relay");
+        let source = InterfaceId::new("world_source");
+        let relay = InterfaceId::new("world_relay");
+        let artifact = ArtifactRef {
+            id: ArtifactId::new("relay.result:exact"),
+            content: ContentHash::of_bytes(b"relay result"),
+        };
+        let trace = TraceId("trace-relay".to_string());
+        let metadata = tail_recovery_metadata(&run, &checkpoint, &relay, &[], "relay.result");
+        let runtime = metadata.runtime.clone().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movements.jsonl");
+        let mut log = DurableLog::open(&path).unwrap();
+        let outbound = append_tail_outbound(
+            &mut log,
+            &trace,
+            &source,
+            &relay,
+            &artifact,
+            &metadata,
+            octopus_ledger::Lamport(0),
+        );
+        let scope = log.append(octopus_ledger::MovementDraft {
+            trace: trace.clone(),
+            kind: MovementKind::ArtifactMoved,
+            from: Endpoint::Interface(relay.clone()),
+            to: Endpoint::Interface(relay.clone()),
+            artifact: Some(artifact.clone()),
+            invocation_metadata: Some(MovementMetadata::ArrivalFanout(ArrivalFanoutMetadata {
+                arrival_fanout: ArrivalFanoutScope {
+                    identity: "retained-checkpoint".into(),
+                    targets: vec![runtime.clone()],
+                },
+            })),
+            causal_floor: None,
+        });
+        let verdict =
+            DeliveryVerdict::refused(RefusedReason::CheckpointSpent, serde_json::Value::Null);
+        for (source_movement_seq, delivery_scope_seq) in [
+            (None, None),
+            (Some(outbound.seq.0), None),
+            (None, Some(scope.seq.0)),
+            (None, None),
+        ] {
+            log.append(octopus_ledger::MovementDraft {
+                trace: trace.clone(),
+                kind: MovementKind::DeliveryRefused,
+                from: Endpoint::Interface(relay.clone()),
+                to: Endpoint::Interface(runtime.worker.clone()),
+                artifact: Some(artifact.clone()),
+                invocation_metadata: Some(MovementMetadata::Delivery(DeliveryMetadata {
+                    delivery_verdict: verdict.clone(),
+                    runtime: Some(runtime.clone()),
+                    source_movement_seq,
+                    delivery_scope_seq,
+                })),
+                causal_floor: None,
+            });
+        }
+        drop(log);
+
+        let mut replay = BootReplay::default();
+        let log =
+            DurableLog::open_with_projection(&path, |movement| replay.observe(movement)).unwrap();
+        assert_eq!(replay.movements.len(), 4);
+        let mut dedup = ArrivalDedupIndex::new();
+        dedup
+            .catch_up_validated_projection(&replay.movements, log.len() as u64)
+            .unwrap();
+        assert_eq!(dedup.watermark(), 6);
+        assert!(matches!(
+            dedup
+                .relay_arrival_state(
+                    outbound.seq.0,
+                    &run,
+                    &checkpoint,
+                    runtime.epoch,
+                    runtime.run_record_hash.as_deref().unwrap(),
+                )
+                .unwrap(),
+            RelayArrivalState::Finished
+        ));
+        assert!(matches!(
+            dedup.retained_arrival_edges(scope.seq.0).unwrap().as_slice(),
+            [(_, RetainedArrivalState::Finished(found))] if found == &verdict
+        ));
     }
 
     #[tokio::test]
