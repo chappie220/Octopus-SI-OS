@@ -375,6 +375,13 @@ unsafe fn read_one(fd: libc::c_int, byte: &mut [u8; 1]) -> std::io::Result<()> {
     }
 }
 
+pub(crate) fn trim_process_memory() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        let _ = libc::malloc_trim(0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

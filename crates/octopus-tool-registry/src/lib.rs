@@ -377,21 +377,253 @@ impl desc::Descriptor for ToolDescriptor {
                 ));
             }
         }
-        jsonschema::meta::try_validate(&self.args_schema)
-            .map_err(|error| {
-                format!(
-                    "tool descriptor '{}' args_schema draft cannot be resolved: {error}",
-                    self.id
-                )
-            })?
-            .map_err(|error| {
-                format!(
-                    "tool descriptor '{}' carries malformed args_schema: {error}",
-                    self.id
-                )
-            })?;
+        validate_args_schema(&self.id, &self.args_schema)?;
         Ok(())
     }
+}
+
+fn validate_args_schema(
+    tool_id: &ToolDescriptorId,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(object) = schema.as_object() {
+        if let Some(draft) = object.get("$schema") {
+            let Some(uri) = draft.as_str() else {
+                return Err(format!(
+                    "tool descriptor '{}' carries malformed args_schema: $schema must be a string",
+                    tool_id
+                ));
+            };
+            if !is_supported_json_schema_draft(uri) {
+                return Err(format!(
+                    "tool descriptor '{}' args_schema draft cannot be resolved: unsupported $schema '{uri}'",
+                    tool_id
+                ));
+            }
+        }
+    }
+    validate_json_schema_node(schema, 0).map_err(|error| {
+        format!(
+            "tool descriptor '{}' carries malformed args_schema: {error}",
+            tool_id
+        )
+    })?;
+    // Compile with a local validator that is immediately dropped rather than
+    // calling `jsonschema::meta::try_validate`, whose global static Draft
+    // 2020-12 meta-schema cache retains hundreds of MiB across registry loads.
+    jsonschema::options()
+        .build(schema)
+        .map_err(|error| {
+            format!(
+                "tool descriptor '{}' carries malformed args_schema: {error}",
+                tool_id
+            )
+        })?;
+    Ok(())
+}
+
+fn is_supported_json_schema_draft(uri: &str) -> bool {
+    let trimmed = uri.trim_end_matches('#');
+    matches!(
+        trimmed,
+        "http://json-schema.org/draft-04/schema"
+            | "https://json-schema.org/draft-04/schema"
+            | "http://json-schema.org/draft-06/schema"
+            | "https://json-schema.org/draft-06/schema"
+            | "http://json-schema.org/draft-07/schema"
+            | "https://json-schema.org/draft-07/schema"
+            | "http://json-schema.org/draft/2019-09/schema"
+            | "https://json-schema.org/draft/2019-09/schema"
+            | "http://json-schema.org/draft/2020-12/schema"
+            | "https://json-schema.org/draft/2020-12/schema"
+    )
+}
+
+fn validate_schema_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "null" | "boolean" | "object" | "array" | "number" | "string" | "integer"
+    )
+}
+
+fn is_non_negative_integer(value: &serde_json::Value) -> bool {
+    value.as_u64().is_some()
+        || value
+            .as_f64()
+            .is_some_and(|number| number.is_finite() && number >= 0.0 && number.fract() == 0.0)
+}
+
+fn validate_string_array(keyword: &str, value: &serde_json::Value) -> Result<(), String> {
+    let Some(items) = value.as_array() else {
+        return Err(format!("'{keyword}' must be an array of strings"));
+    };
+    if !items.iter().all(|item| item.is_string()) {
+        return Err(format!("'{keyword}' must contain only strings"));
+    }
+    Ok(())
+}
+
+fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result<(), String> {
+    if depth > 128 {
+        return Err("schema nesting exceeds maximum depth".to_string());
+    }
+    let object = match schema {
+        serde_json::Value::Bool(_) => return Ok(()),
+        serde_json::Value::Object(map) => map,
+        _ => return Err("schema must be a JSON object or boolean".to_string()),
+    };
+
+    for (keyword, value) in object {
+        match keyword.as_str() {
+            "type" => match value {
+                serde_json::Value::String(name) => {
+                    if !validate_schema_type_name(name) {
+                        return Err(format!("unknown schema type '{name}'"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    if items.is_empty() {
+                        return Err("'type' array must not be empty".to_string());
+                    }
+                    let mut seen = BTreeSet::new();
+                    for item in items {
+                        let Some(name) = item.as_str() else {
+                            return Err("'type' array entries must be strings".to_string());
+                        };
+                        if !validate_schema_type_name(name) {
+                            return Err(format!("unknown schema type '{name}'"));
+                        }
+                        if !seen.insert(name) {
+                            return Err(format!("duplicate schema type '{name}'"));
+                        }
+                    }
+                }
+                _ => return Err("'type' must be a string or array of strings".to_string()),
+            },
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                let Some(entries) = value.as_object() else {
+                    return Err(format!("'{keyword}' must be an object"));
+                };
+                for child in entries.values() {
+                    validate_json_schema_node(child, depth + 1)?;
+                }
+            }
+            "additionalProperties"
+            | "additionalItems"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "contains"
+            | "propertyNames"
+            | "unevaluatedProperties"
+            | "unevaluatedItems" => {
+                validate_json_schema_node(value, depth + 1)?;
+            }
+            "items" => match value {
+                serde_json::Value::Array(entries) => {
+                    for child in entries {
+                        validate_json_schema_node(child, depth + 1)?;
+                    }
+                }
+                _ => validate_json_schema_node(value, depth + 1)?,
+            },
+            "prefixItems" | "allOf" | "anyOf" | "oneOf" => {
+                let Some(entries) = value.as_array() else {
+                    return Err(format!("'{keyword}' must be a non-empty array"));
+                };
+                if entries.is_empty() {
+                    return Err(format!("'{keyword}' must not be empty"));
+                }
+                for child in entries {
+                    validate_json_schema_node(child, depth + 1)?;
+                }
+            }
+            "required" => validate_string_array("required", value)?,
+            "enum" => {
+                let Some(entries) = value.as_array() else {
+                    return Err("'enum' must be a non-empty array".to_string());
+                };
+                if entries.is_empty() {
+                    return Err("'enum' must not be empty".to_string());
+                }
+            }
+            "minLength"
+            | "maxLength"
+            | "minItems"
+            | "maxItems"
+            | "minProperties"
+            | "maxProperties"
+            | "minContains"
+            | "maxContains" => {
+                if !is_non_negative_integer(value) {
+                    return Err(format!("'{keyword}' must be a non-negative integer"));
+                }
+            }
+            "minimum" | "maximum" => {
+                if !value.is_number() {
+                    return Err(format!("'{keyword}' must be a number"));
+                }
+            }
+            "exclusiveMinimum" | "exclusiveMaximum" => {
+                if !value.is_number() && !value.is_boolean() {
+                    return Err(format!("'{keyword}' must be a number or boolean"));
+                }
+            }
+            "multipleOf" => {
+                if !value
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number > 0.0)
+                {
+                    return Err("'multipleOf' must be a positive number".to_string());
+                }
+            }
+            "uniqueItems" | "readOnly" | "writeOnly" | "deprecated" => {
+                if !value.is_boolean() {
+                    return Err(format!("'{keyword}' must be a boolean"));
+                }
+            }
+            "pattern"
+            | "$schema"
+            | "$ref"
+            | "$dynamicRef"
+            | "$id"
+            | "$anchor"
+            | "$dynamicAnchor"
+            | "$comment"
+            | "title"
+            | "description"
+            | "format"
+            | "contentEncoding"
+            | "contentMediaType" => {
+                if !value.is_string() {
+                    return Err(format!("'{keyword}' must be a string"));
+                }
+            }
+            "dependentRequired" => {
+                let Some(entries) = value.as_object() else {
+                    return Err("'dependentRequired' must be an object".to_string());
+                };
+                for list in entries.values() {
+                    validate_string_array("dependentRequired", list)?;
+                }
+            }
+            "dependencies" => {
+                let Some(entries) = value.as_object() else {
+                    return Err("'dependencies' must be an object".to_string());
+                };
+                for entry in entries.values() {
+                    if entry.is_array() {
+                        validate_string_array("dependencies", entry)?;
+                    } else {
+                        validate_json_schema_node(entry, depth + 1)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn is_reserved_tool_process_env(name: &str) -> bool {
@@ -864,5 +1096,55 @@ mod tests {
         upgraded.args_schema["$defs"]["entries"]["properties"]["b"] = json!({ "type": "integer" });
         assert!(copy.never_wider_than(&upgraded));
         assert!(!upgraded.never_wider_than(&copy));
+    }
+
+    #[test]
+    fn args_schema_validation_accepts_valid_and_rejects_malformed_or_unknown_draft() {
+        let mut descriptor = descriptor_with_code_kind();
+        descriptor.args_schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "path": { "type": "string", "minLength": 1, "pattern": "^[^\\0]+$" }
+            },
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+                "path": { "$ref": "#/$defs/path" },
+                "mode": { "enum": ["read", "write"] }
+            },
+            "if": { "properties": { "mode": { "const": "write" } } },
+            "then": { "required": ["path"] }
+        });
+        descriptor.validate().unwrap();
+
+        descriptor.args_schema = json!(true);
+        descriptor.validate().unwrap();
+
+        for malformed in [
+            json!(123),
+            json!({ "type": 123 }),
+            json!({ "type": "not-a-type" }),
+            json!({ "properties": [] }),
+            json!({ "required": "path" }),
+            json!({ "minLength": -1 }),
+            json!({ "pattern": "[" }),
+        ] {
+            descriptor.args_schema = malformed;
+            let error = descriptor.validate().unwrap_err();
+            assert!(
+                error.contains("carries malformed args_schema"),
+                "unexpected error: {error}"
+            );
+        }
+
+        descriptor.args_schema = json!({
+            "$schema": "https://example.com/unsupported-schema-draft",
+            "type": "object"
+        });
+        assert!(descriptor
+            .validate()
+            .unwrap_err()
+            .contains("args_schema draft cannot be resolved"));
     }
 }
