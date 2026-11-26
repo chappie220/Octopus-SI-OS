@@ -476,6 +476,12 @@ impl LinuxProcessPolicy {
             }
             UnixSocketMediation::FamilyAndType => {}
         }
+        if self.allow_sandbox_delegation && !allow_unix {
+            match unix_mediation {
+                UnixSocketMediation::FineGrained => profile.push_str(ANONYMOUS_SPAWN_SOCKET),
+                UnixSocketMediation::FamilyAndType => profile.push_str("  network unix seqpacket,\n"),
+            }
+        }
         if self.allow_application_launch {
             profile.push_str("  dbus (send, receive),\n");
         }
@@ -513,6 +519,10 @@ pub enum UnixSocketMediation {
 /// abstract or unnamed addresses. Abstract sockets stay closed here.
 const ANONYMOUS_STREAM_SOCKETS: &str =
     "  unix (create, read, write, shutdown, getattr, getopt, setopt) type=stream addr=none,\n";
+
+/// Linux Rust process launch uses an unnamed seqpacket socket pair for error reporting.
+const ANONYMOUS_SPAWN_SOCKET: &str =
+    "  unix (create, read, write, getattr, getopt, setopt) type=seqpacket addr=none,\n";
 
 impl FileSelector {
     fn patterns(&self) -> Result<Vec<String>, String> {
@@ -723,10 +733,11 @@ mod tests {
     }
 
     #[test]
-    fn a_process_without_ipc_owns_only_unnamed_stream_sockets() {
+    fn a_process_without_ipc_uses_unnamed_sockets_for_runtime_and_delegation() {
         for delegation in [false, true] {
             let closed = profile(false, false, delegation);
             assert!(closed.contains(ANONYMOUS_STREAM_SOCKETS), "{closed}");
+            assert_eq!(closed.contains(ANONYMOUS_SPAWN_SOCKET), delegation, "{closed}");
             assert!(!closed.contains("  unix,\n") && !closed.contains("network"), "{closed}");
             assert_eq!(
                 closed.contains("  unix (create, getattr, getopt, setopt),\n"),
@@ -772,12 +783,16 @@ mod tests {
             } else {
                 "  network unix stream,"
             };
+            let mut expected = vec![rule];
+            if delegation && !network && !local_ipc {
+                expected.push("  network unix seqpacket,");
+            }
             assert_eq!(
                 profile
                     .lines()
                     .filter(|line| line.starts_with("  network"))
                     .collect::<Vec<_>>(),
-                [rule],
+                expected,
             );
             let access = if delegation { "" } else { "deny " };
             assert!(profile.contains(&format!("  {access}\"{CONTROL_SOCKET}\" rw,\n")));

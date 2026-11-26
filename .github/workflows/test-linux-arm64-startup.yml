@@ -11,6 +11,7 @@ on:
       - 'crates/octopus-ledger*/**'
       - 'crates/octopus-verifiers/src/linux_process.rs'
       - 'crates/octopus-verifiers/src/process_authority.rs'
+      - 'crates/octopus-verifiers/src/process_authority/**'
       - 'registry/interface/system_interface_authoring/packages/octopus-run-authoring/**'
   workflow_dispatch: {}
 
@@ -61,7 +62,21 @@ jobs:
           cargo test --locked --release -p octopus-run-authoring --lib \
             tests::writer_edge_candidates_keep_unattributed_rows_and_validate_ledger_bytes -- --exact
       - name: Exercise Linux child launch diagnostics on ARM64
-        run: >-
-          cargo test --locked --release -p octopus-verifiers --lib
-          linux_process::tests::spawn_diagnostics_distinguish_setup_failure_from_exec_failure
-          -- --exact
+        run: |
+          cargo test --locked --release -p octopus-verifiers --lib \
+            linux_process::tests::spawn_diagnostics_distinguish_setup_failure_from_exec_failure -- --exact
+          cargo test --locked --release -p octopus-verifiers --lib process_authority::linux::tests
+      - name: Package the ARM64 process authority service
+        run: |
+          cargo build --locked --release --bin octopus-linux-process-authority
+          mkdir -p "$RUNNER_TEMP/octopus-process-authority"
+          install target/release/octopus-linux-process-authority "$RUNNER_TEMP/octopus-process-authority/"
+          cd "$RUNNER_TEMP/octopus-process-authority"
+          readelf -h octopus-linux-process-authority | grep -E 'Machine:[[:space:]]+AArch64$'
+          sha256sum octopus-linux-process-authority | tee SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: octopus-process-authority-linux-arm64
+          path: ${{ runner.temp }}/octopus-process-authority/
+          if-no-files-found: error
+          retention-days: 7

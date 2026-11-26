@@ -103,8 +103,10 @@ This option uses AppArmor's family-and-type network rules. Processes without
 network or local IPC authority can use abstract Unix stream sockets as well as
 unnamed stream socket pairs. The profile still limits other socket families,
 filesystem paths and access to the process-authority socket according to its
-grant. The parser may still report that it generated a generic rule for the
-Unix socket family. This specific diagnostic is accepted in compatibility mode;
+grant. Profiles delegated to start confined children also receive Unix
+seqpacket access for Rust's spawn handshake. Fine-grained mode grants this
+access only to unnamed sockets. The parser may still report that it generated
+a generic rule for the Unix socket family. This diagnostic is accepted in compatibility mode;
 other diagnostics still stop the launch. Enable the override only on a
 dedicated host with that kernel limitation. Remove the override and restart
 both services to restore fine-grained enforcement after upgrading the kernel.
