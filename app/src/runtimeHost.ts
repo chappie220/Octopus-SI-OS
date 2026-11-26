@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { isAgentWebClient } from "./webClient";
+import { notifyClientAccessUnauthorized } from "./clientAccess";
+import { backoffDelayMs, fetchWithTimeout, readJsonSafely } from "./resilientTransport";
 import type { OctopusClientAccessProfile, OctopusHomeStorageHealth, OctopusInterfaceFailure, OctopusRuntimeHostState } from "./electron";
+
+export const RUNTIME_STATUS_RETRY_EVENT = "octopus:retry-runtime-status";
+const RUNTIME_STATUS_TIMEOUT_MS = 8_000;
+const RUNTIME_STATUS_POLL_MS = 3_000;
 
 export type RuntimeClientState = OctopusRuntimeHostState & {
   available: boolean;
@@ -64,33 +70,88 @@ export function useRuntimeHost(profile?: OctopusClientAccessProfile | null) {
     if (isAgentWebClient()) {
       if (profile !== "live") return;
       const abort = new AbortController();
-      let timer: number;
+      let timer: number | undefined;
+      let inFlight = false;
+      let consecutiveFailures = 0;
+      let everReady = false;
+      const schedule = (delayMs: number) => {
+        if (abort.signal.aborted) return;
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => { void poll(); }, delayMs);
+      };
       const poll = async () => {
+        if (abort.signal.aborted || inFlight) return;
+        inFlight = true;
         try {
-          const response = await fetch("/__octopus/runtime-status", { signal: abort.signal });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || `Runtime status failed: HTTP ${response.status}`);
+          const response = await fetchWithTimeout(
+            "/__octopus/runtime-status",
+            { signal: abort.signal, cache: "no-store", credentials: "same-origin" },
+            RUNTIME_STATUS_TIMEOUT_MS,
+          );
+          if (response.status === 401) {
+            notifyClientAccessUnauthorized();
+            return;
+          }
+          const result = await readJsonSafely(response);
+          if (!response.ok) {
+            throw new Error(typeof result?.error === "string" ? result.error : `Runtime status failed: HTTP ${response.status}`);
+          }
+          if (!result) throw new Error("Runtime status returned an unreadable response.");
+          consecutiveFailures = 0;
+          if (result.ready === true) everReady = true;
           if (!abort.signal.aborted) setState({
             ...EMPTY_STATE,
             available: false,
-            phase: result.phase,
-            ready: result.ready,
-            home: result.home,
-            error: result.error,
-            storageHealth: result.storageHealth,
-            interfaceFailures: result.interfaceFailures,
+            phase: typeof result.phase === "string" ? result.phase as OctopusRuntimeHostState["phase"] : "degraded",
+            ready: Boolean(result.ready),
+            home: typeof result.home === "string" ? result.home : "",
+            error: typeof result.error === "string" ? result.error : null,
+            storageHealth: (result.storageHealth as OctopusHomeStorageHealth | null) ?? null,
+            interfaceFailures: Array.isArray(result.interfaceFailures) ? (result.interfaceFailures as OctopusInterfaceFailure[]) : [],
+            updatedAtMs: Date.now(),
           });
+          schedule(RUNTIME_STATUS_POLL_MS);
         } catch (error) {
-          if (!abort.signal.aborted) setState((previous) => ({
-            ...previous, available: false, ready: false, phase: "degraded",
-            error: error instanceof Error ? error.message : String(error),
-          }));
+          if (abort.signal.aborted) return;
+          consecutiveFailures += 1;
+          const message = error instanceof Error ? error.message : String(error);
+          setState((previous) => {
+            if (everReady && consecutiveFailures < 2) {
+              return { ...previous, error: message, updatedAtMs: Date.now() };
+            }
+            return {
+              ...previous,
+              available: false,
+              ready: false,
+              phase: consecutiveFailures >= 2 ? "degraded" : previous.phase,
+              error: message,
+              updatedAtMs: Date.now(),
+            };
+          });
+          schedule(backoffDelayMs(consecutiveFailures, 1_500, 6_000));
         } finally {
-          if (!abort.signal.aborted) timer = window.setTimeout(() => { void poll(); }, 3_000);
+          inFlight = false;
         }
       };
+      const triggerNow = () => {
+        if (abort.signal.aborted) return;
+        window.clearTimeout(timer);
+        void poll();
+      };
+      const onVisibility = () => {
+        if (document.visibilityState === "visible") triggerNow();
+      };
+      window.addEventListener("online", triggerNow);
+      window.addEventListener(RUNTIME_STATUS_RETRY_EVENT, triggerNow);
+      document.addEventListener("visibilitychange", onVisibility);
       void poll();
-      return () => { abort.abort(); window.clearTimeout(timer); };
+      return () => {
+        abort.abort();
+        window.clearTimeout(timer);
+        window.removeEventListener("online", triggerNow);
+        window.removeEventListener(RUNTIME_STATUS_RETRY_EVENT, triggerNow);
+        document.removeEventListener("visibilitychange", onVisibility);
+      };
     }
     const bridge = window.octopusTransport;
     if (!bridge?.bootStatus) {

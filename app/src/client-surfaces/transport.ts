@@ -1,4 +1,6 @@
 import { isWebClient } from "../webClient";
+import { notifyClientAccessUnauthorized } from "../clientAccess";
+import { createReconnectingEventSource, fetchWithRetry } from "../resilientTransport";
 import type { ClientSurfaceDocumentChange, ClientSurfaceDocumentSnapshot } from "./types";
 
 export async function readClientSurfaceDocuments(): Promise<ClientSurfaceDocumentSnapshot> {
@@ -6,7 +8,14 @@ export async function readClientSurfaceDocuments(): Promise<ClientSurfaceDocumen
     return window.octopusTransport.clientSurfaceDocuments();
   }
   if (!isWebClient()) throw new Error("client surface documents require the desktop app or Agent server");
-  const response = await fetch("/__octopus/client-surfaces", { cache: "no-store" });
+  const response = await fetchWithRetry(
+    "/__octopus/client-surfaces",
+    { cache: "no-store", credentials: "same-origin" },
+    { timeoutMs: 8_000, maxAttempts: 4, initialDelayMs: 600, maxDelayMs: 5_000 },
+  );
+  if (response.status === 401) {
+    notifyClientAccessUnauthorized();
+  }
   if (!response.ok) throw new Error(`client surface read failed: HTTP ${response.status}`);
   return response.json() as Promise<ClientSurfaceDocumentSnapshot>;
 }
@@ -18,14 +27,18 @@ export function subscribeClientSurfaceDocuments(
     return window.octopusTransport.onClientSurfaceDocumentsChanged(listener);
   }
   if (!isWebClient()) return () => {};
-  const source = new EventSource("/__octopus/client-surface-events");
-  source.onmessage = (event) => {
-    try {
-      const value = JSON.parse(event.data) as ClientSurfaceDocumentChange;
-      if (typeof value.generation === "number") listener(value);
-    } catch {
+  return createReconnectingEventSource("/__octopus/client-surface-events", {
+    onMessage: (event) => {
+      try {
+        const value = JSON.parse(event.data) as ClientSurfaceDocumentChange;
+        if (typeof value.generation === "number") listener(value);
+      } catch {
+        listener({ generation: Date.now() });
+      }
+    },
+    onReconnect: () => {
       listener({ generation: Date.now() });
-    }
-  };
-  return () => source.close();
+    },
+    onAuthError: notifyClientAccessUnauthorized,
+  });
 }
