@@ -40,7 +40,7 @@ pub use octopus_ledger::SharedBlobs;
 
 use crate::context_artifact_cache::RegistryContextArtifactCache;
 use crate::registry_reference_graph::{
-    ActivationReferenceSet, RegistryNode, RegistryPackages, RegistryReferenceGraph,
+    ActivationReferenceSet, InterfaceFormationSource, RegistryNode, RegistryPackages, RegistryReferenceGraph,
 };
 
 #[path = "spine_root/commit.rs"]
@@ -75,6 +75,7 @@ pub(crate) struct LoadedRegistrySnapshot {
 enum FormationSource {
     Ee(EeId),
     Interface(InterfaceId),
+    ConfiguredInterface(InterfaceFormationSource),
     Worker(InterfaceId),
     Tool(ToolId),
     EnvironmentKind(Box<WorkerEnvKindSpec>),
@@ -718,6 +719,7 @@ impl LoadedRegistrySnapshot {
 
     fn from_loaded(
         interfaces_loaded: LoadedInterfaces,
+        mut interface_sources: BTreeMap<InterfaceId, InterfaceFormationSource>,
         interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
         worker_interface_policies: Arc<BTreeMap<InterfaceId, WorkerInterfacePolicy>>,
         tool_descriptors_loaded: Vec<(DescriptorName, ToolDescriptor)>,
@@ -772,9 +774,12 @@ impl LoadedRegistrySnapshot {
             );
         }
         for (_, descriptor) in interfaces_loaded.iter() {
+            let source = interface_sources.remove(&descriptor.id)
+                .map(FormationSource::ConfiguredInterface)
+                .unwrap_or_else(|| FormationSource::Interface(descriptor.id.clone()));
             formation_sources.insert(
                 crate::worker_policy::interface_descriptor_source_name(&descriptor.id),
-                FormationSource::Interface(descriptor.id.clone()),
+                source,
             );
         }
         for worker in worker_interface_policies.keys() {
@@ -821,8 +826,11 @@ impl LoadedRegistrySnapshot {
             source_file_hashes: Arc::new(BTreeMap::new()),
         };
         snapshot.formation_source_hashes = snapshot.formation_sources.iter().map(|(name, source)| {
-            let bytes = snapshot.formation_source_bytes(name, source)?;
-            Ok((name.clone(), DescriptorHash::of_bytes(&bytes)))
+            let hash = match source {
+                FormationSource::ConfiguredInterface(source) => source.hash,
+                _ => DescriptorHash::of_bytes(&snapshot.formation_source_bytes(name, source)?),
+            };
+            Ok((name.clone(), hash))
         }).collect::<Result<_, String>>()?;
         Ok(snapshot)
     }
@@ -832,6 +840,7 @@ impl LoadedRegistrySnapshot {
         match source {
             FormationSource::Ee(id) => encode_formation_source(name, self.ee_tree.get(id).ok_or_else(missing)?),
             FormationSource::Interface(id) => encode_formation_source(name, self.interfaces_by_id.get(id).ok_or_else(missing)?.as_ref()),
+            FormationSource::ConfiguredInterface(source) => source.read(),
             FormationSource::Worker(id) => encode_formation_source(name, self.worker_interface_policies.get(id).ok_or_else(missing)?),
             FormationSource::Tool(id) => encode_formation_source(name, self.tool_descriptions.by_tool.get(id).ok_or_else(missing)?),
             FormationSource::EnvironmentKind(descriptor) => encode_formation_source(name, descriptor.as_ref()),
@@ -1198,6 +1207,7 @@ impl LoadedRegistrySnapshot {
         ee_instances.issues.append(&mut topology_issues);
         Self::from_loaded(
             share_interfaces(packages.interfaces),
+            packages.interface_sources,
             packages.interface_dispositions,
             Arc::new(packages.worker_policies),
             packages.tools,
@@ -2078,6 +2088,7 @@ pub async fn build_embedded_spine_with_progress(
 
     let loaded_registry_snapshot = LoadedRegistrySnapshot::from_loaded(
         interfaces_loaded.clone(),
+        packages.interface_sources,
         interface_dispositions,
         worker_interface_policies.clone(),
         tool_descriptors_loaded.clone(),

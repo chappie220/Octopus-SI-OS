@@ -76,6 +76,25 @@ def ledger_digest(path):
         return hashlib.file_digest(ledger, "sha256").hexdigest()
 
 
+def write_interface_catalog(registry):
+    settings = [{"name": "setting", "enabled": True}] * 8
+    models = [{"name": f"model-{i}", "settings": settings} for i in range(460)]
+    for index in range(80):
+        interface = f"world_fixture_provider_{index:03d}"
+        owner = registry / "interface" / interface
+        owner.mkdir(parents=True)
+        descriptor = {
+            "id": interface,
+            "interface_type": "world",
+            "role": "provider",
+            "direction": "bidirectional",
+            "source_names": ["fixture"],
+            "interface_driver_ref": "fixture",
+            "interface_driver_config": {"private_config": {"models": models}},
+        }
+        (owner / "interface.json").write_text(json.dumps(descriptor), encoding="utf-8")
+
+
 def runtime_phase(endpoint, pid):
     try:
         with socket.socket(socket.AF_UNIX) as connection:
@@ -162,7 +181,8 @@ def main():
                 SELECT COUNT(*) FROM movements
                 WHERE kind = 'DeliveryRefused' AND runtime_run = 'run_writer_fixture'
             """).fetchone()[0] == ROW_COUNT - 1
-        exercise_runtime(runtime, home, "warm-index", "ready")
+        write_interface_catalog(home / "registry")
+        exercise_runtime(runtime, home, "warm-index-with-interface-catalog", "ready")
         exercise_runtime(runtime, home, "cancel-during-replay", "restoring_runtime")
         assert ledger_digest(ledger) == original
         print(f"Ledger preserved byte-for-byte across three boots ({ROW_COUNT:,} rows).")

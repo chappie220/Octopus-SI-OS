@@ -137,11 +137,8 @@ fn normalized_formation_inputs_rebuild_the_historical_grant_after_source_changes
     let replayed = resolve(&registry, &instances, historical.clone(), blobs.clone()).unwrap();
     assert_eq!(replayed.grant(), first.grant());
     assert_eq!(replayed.metadata_projection(), first.metadata_projection());
-    historical
-        .formation_source_bytes
-        .get_mut(&policy_name)
-        .unwrap()
-        .push(b' ');
+    *historical.formation_sources.get_mut(&policy_name).unwrap() =
+        FormationSource::Ee(EeId::new("ee_root"));
     assert!(
         resolve(&registry, &instances, historical, blobs)
             .unwrap_err()
