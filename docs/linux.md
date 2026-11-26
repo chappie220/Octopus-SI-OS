@@ -79,8 +79,9 @@ processes cannot request new profiles; only a process whose declaration grants
 sandbox delegation may do so. Requests from another user namespace are refused.
 
 A process without network or local IPC authority may still create unnamed
-stream socket pairs, which language runtimes use to wake their own event loops.
-It cannot bind or connect an abstract socket. AppArmor mediates a pathname
+stream and seqpacket socket pairs, which language runtimes use to wake their
+own event loops and Rust's Unix process spawner uses to relay child spawn
+errors before exec. It cannot bind or connect an abstract socket. AppArmor mediates a pathname
 socket through the file rule of its path, so such a process reaches one only
 where its declared file authority already lets it write that path. The service's
 control socket is granted by path to a process with sandbox delegation and
@@ -100,8 +101,9 @@ Environment=OCTOPUS_APPARMOR_UNIX_COMPAT=1
 Run `sudo systemctl restart octopus-process-authority.service`, then restart
 the Octopus runtime for the same Home so its interfaces are launched again.
 This option uses AppArmor's family-and-type network rules. Processes without
-network or local IPC authority can use abstract Unix stream sockets as well as
-unnamed stream socket pairs. The profile still limits other socket families,
+network or local IPC authority can use Unix stream and seqpacket sockets
+(including unnamed socket pairs used by event loops and Rust's process spawner).
+The profile still limits other socket families,
 filesystem paths and access to the process-authority socket according to its
 grant. The parser may still report that it generated a generic rule for the
 Unix socket family. This specific diagnostic is accepted in compatibility mode;

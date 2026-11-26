@@ -470,9 +470,9 @@ impl LinuxProcessPolicy {
             self.allow_network || self.allow_local_ipc || self.allow_application_launch;
         match unix_mediation {
             UnixSocketMediation::FineGrained if allow_unix => profile.push_str("  unix,\n"),
-            UnixSocketMediation::FineGrained => profile.push_str(ANONYMOUS_STREAM_SOCKETS),
+            UnixSocketMediation::FineGrained => profile.push_str(ANONYMOUS_LOCAL_SOCKETS),
             UnixSocketMediation::FamilyAndType if !allow_unix => {
-                profile.push_str("  network unix stream,\n");
+                profile.push_str("  network unix stream,\n  network unix seqpacket,\n");
             }
             UnixSocketMediation::FamilyAndType => {}
         }
@@ -507,12 +507,13 @@ pub enum UnixSocketMediation {
 }
 
 /// A process without network or local IPC authority still owns unnamed stream
-/// socket pairs, which event loops use as their wake-up channel. AppArmor
-/// mediates a pathname socket through the file rule of its path, so the
-/// control socket is granted or denied by path; a `unix` rule only accepts
+/// and seqpacket socket pairs, which event loops use as wake-up channels and
+/// Rust's Unix process spawner uses to relay child spawn errors before exec.
+/// AppArmor mediates a pathname socket through the file rule of its path, so
+/// the control socket is granted or denied by path; a `unix` rule only accepts
 /// abstract or unnamed addresses. Abstract sockets stay closed here.
-const ANONYMOUS_STREAM_SOCKETS: &str =
-    "  unix (create, read, write, shutdown, getattr, getopt, setopt) type=stream addr=none,\n";
+const ANONYMOUS_LOCAL_SOCKETS: &str =
+    "  unix (create, read, write, shutdown, getattr, getopt, setopt) type=stream addr=none,\n  unix (create, read, write, shutdown, getattr, getopt, setopt) type=seqpacket addr=none,\n";
 
 impl FileSelector {
     fn patterns(&self) -> Result<Vec<String>, String> {
@@ -723,10 +724,10 @@ mod tests {
     }
 
     #[test]
-    fn a_process_without_ipc_owns_only_unnamed_stream_sockets() {
+    fn a_process_without_ipc_owns_only_unnamed_local_sockets() {
         for delegation in [false, true] {
             let closed = profile(false, false, delegation);
-            assert!(closed.contains(ANONYMOUS_STREAM_SOCKETS), "{closed}");
+            assert!(closed.contains(ANONYMOUS_LOCAL_SOCKETS), "{closed}");
             assert!(!closed.contains("  unix,\n") && !closed.contains("network"), "{closed}");
             assert_eq!(
                 closed.contains("  unix (create, getattr, getopt, setopt),\n"),
@@ -735,9 +736,9 @@ mod tests {
             );
         }
         let local = profile(false, true, false);
-        assert!(local.contains("  network unix,\n  unix,\n") && !local.contains(ANONYMOUS_STREAM_SOCKETS), "{local}");
+        assert!(local.contains("  network unix,\n  unix,\n") && !local.contains(ANONYMOUS_LOCAL_SOCKETS), "{local}");
         let network = profile(true, false, false);
-        assert!(network.contains("  network,\n  unix,\n") && !network.contains(ANONYMOUS_STREAM_SOCKETS), "{network}");
+        assert!(network.contains("  network,\n  unix,\n") && !network.contains(ANONYMOUS_LOCAL_SOCKETS), "{network}");
     }
 
     #[test]
@@ -765,19 +766,19 @@ mod tests {
                         || line.trim_start() == "unix,"),
                 "{profile}"
             );
-            let rule = if network {
-                "  network,"
+            let rules: Vec<&str> = if network {
+                vec!["  network,"]
             } else if local_ipc {
-                "  network unix,"
+                vec!["  network unix,"]
             } else {
-                "  network unix stream,"
+                vec!["  network unix stream,", "  network unix seqpacket,"]
             };
             assert_eq!(
                 profile
                     .lines()
                     .filter(|line| line.starts_with("  network"))
                     .collect::<Vec<_>>(),
-                [rule],
+                rules,
             );
             let access = if delegation { "" } else { "deny " };
             assert!(profile.contains(&format!("  {access}\"{CONTROL_SOCKET}\" rw,\n")));
