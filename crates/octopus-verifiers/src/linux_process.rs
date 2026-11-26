@@ -144,6 +144,7 @@ impl LinuxLease {
         self: &Arc<Self>,
         command: &mut Command,
         diagnostics: Option<Arc<SpawnDiagnostics>>,
+        working_directory: Option<CString>,
     ) {
         let lease = Arc::clone(self);
         let request = format!("ATTACH {}\n", self.token).into_bytes();
@@ -166,6 +167,9 @@ impl LinuxLease {
                 report_stage(diagnostics, b'P', change_profile(lease.profile.as_bytes()))?;
                 if lease.no_new_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return report_stage(diagnostics, b'N', Err(std::io::Error::last_os_error()));
+                }
+                if let Some(directory) = &working_directory {
+                    enter_working_directory(directory, diagnostics)?;
                 }
                 write_stage(diagnostics, b'X');
                 Ok(())
@@ -219,6 +223,7 @@ pub(crate) fn describe_spawn_error(diagnostics: &SpawnDiagnostics, error: std::i
         b'D' => "preparing an authorized directory",
         b'P' => "applying the prepared AppArmor profile",
         b'N' => "setting no_new_privs",
+        b'W' => "entering the tool working directory under Linux authority",
         b'X' => "launching the program after Linux authority setup",
         _ => "starting the child before Linux authority setup",
     };
@@ -232,6 +237,16 @@ fn report_stage(
         write_stage(diagnostic, stage);
     }
     result
+}
+
+fn enter_working_directory(
+    directory: &std::ffi::CStr,
+    diagnostics: Option<&SpawnDiagnostics>,
+) -> std::io::Result<()> {
+    if unsafe { libc::chdir(directory.as_ptr()) } != 0 {
+        return report_stage(diagnostics, b'W', Err(std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 fn write_stage(diagnostic: Option<&SpawnDiagnostics>, stage: u8) {
@@ -370,6 +385,7 @@ mod tests {
         for (stage, errno, label) in [
             (0, libc::ENOENT, "starting the child before Linux authority setup"),
             (b'P', libc::EACCES, "applying the prepared AppArmor profile"),
+            (b'W', libc::ENOENT, "entering the tool working directory under Linux authority"),
             (b'X', libc::ENOENT, "launching the program after Linux authority setup"),
         ] {
             let diagnostics = Arc::new(SpawnDiagnostics::new().unwrap());
@@ -378,11 +394,14 @@ mod tests {
             if stage == 0 {
                 command.current_dir(&missing);
             }
+            let directory = CString::new(missing.as_os_str().as_bytes()).unwrap();
             unsafe {
                 command.pre_exec(move || {
                     if stage == b'X' {
                         write_stage(Some(&writer), stage);
                         Ok(())
+                    } else if stage == b'W' {
+                        enter_working_directory(&directory, Some(&writer))
                     } else {
                         report_stage(Some(&writer), stage, Err(std::io::Error::from_raw_os_error(errno)))
                     }
@@ -392,5 +411,16 @@ mod tests {
             assert_eq!(error.raw_os_error(), Some(errno));
             assert!(describe_spawn_error(&diagnostics, error).contains(label));
         }
+
+        let directory = tempfile::tempdir().unwrap();
+        let expected = directory.path().canonicalize().unwrap();
+        let working_directory = CString::new(expected.as_os_str().as_bytes()).unwrap();
+        let mut command = Command::new("/bin/pwd");
+        unsafe {
+            command.pre_exec(move || enter_working_directory(&working_directory, None));
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::str::from_utf8(&output.stdout).unwrap().trim(), expected.to_str().unwrap());
     }
 }
