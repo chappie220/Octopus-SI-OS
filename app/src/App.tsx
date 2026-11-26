@@ -21,7 +21,7 @@ import type { OctopusClientAccessStatus, OctopusTouchIdStatus } from "./electron
 import { appToast, AppToastViewport } from "./toasts";
 import { ClientPreferencesProvider } from "./clientPreferences";
 import { isAgentWebClient } from "./webClient";
-import { useRuntimeHost } from "./runtimeHost";
+import { RUNTIME_STATUS_RETRY_EVENT, useRuntimeHost } from "./runtimeHost";
 import { MAIN_CLIENT_WINDOW_BOOTSTRAP } from "./shell/clientWindowModel";
 
 const QuickTaskAccessUnavailable = lazy(() => import("./components/QuickTaskWindow").then((module) => ({ default: module.QuickTaskAccessUnavailable })));
@@ -38,9 +38,19 @@ const LOCK_TOUCH_ID_FRAME_SCALES = [1, 2 / 3];
 export function App() {
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(() => initializeOnboarding());
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
-  const { access, accessError, setAccess } = useClientAccess();
+  const { access, accessError, accessAttempt = 1, accessRetryReason = "", retryAccess, setAccess } = useClientAccess();
   const agentWebClient = isAgentWebClient();
   const runtimeHost = useRuntimeHost(access?.profile);
+  const [slowAccessWait, setSlowAccessWait] = useState(false);
+
+  useEffect(() => {
+    if (access || accessError) {
+      setSlowAccessWait(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSlowAccessWait(true), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [access, accessError]);
   const windowMode = useMemo(() => new URLSearchParams(window.location.search).get("window"), []);
   const clientWindow = useMemo(
     () => window.octopusTransport?.clientWindowBootstrap?.() ?? MAIN_CLIENT_WINDOW_BOOTSTRAP,
@@ -69,6 +79,16 @@ export function App() {
   }, [launchGate]);
 
   if (!access) {
+    const triggerAccessRetry = () => {
+      if (retryAccess) retryAccess();
+      else window.location.reload();
+    };
+    const connectingLabel = agentWebClient ? "Connecting to the Agent server" : "Connecting to the local client host";
+    const connectingDetail = accessAttempt > 1
+      ? `${agentWebClient ? "Reconnecting to the Agent server" : "Reconnecting to the local client host"} (attempt ${accessAttempt})${accessRetryReason ? ` · ${accessRetryReason}` : "…"}`
+      : slowAccessWait
+        ? `${connectingLabel}…`
+        : undefined;
     return (
       <>
         {primaryWindowControls}
@@ -78,10 +98,20 @@ export function App() {
               <>
                 <strong>{agentWebClient ? "Unable to connect to the Agent server" : "Client access host is unavailable"}</strong>
                 <span>{accessError}</span>
-                <button onClick={() => window.location.reload()} type="button">Reload</button>
+                <span>Retrying automatically when the connection recovers…</span>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button onClick={triggerAccessRetry} type="button">Retry now</button>
+                  <button onClick={() => window.location.reload()} type="button">Reload</button>
+                </div>
               </>
             ) : (
-              <OctopusLoadingState className="app-loading-state" label={agentWebClient ? "Connecting to the Agent server" : "Connecting to the local client host"} />
+              <OctopusLoadingState
+                actionLabel={accessAttempt > 1 || slowAccessWait ? "Retry now" : undefined}
+                className="app-loading-state"
+                detail={connectingDetail}
+                label={connectingLabel}
+                onAction={accessAttempt > 1 || slowAccessWait ? triggerAccessRetry : undefined}
+              />
             )}
           </div>
         </main>
@@ -186,17 +216,29 @@ export function App() {
     appToast.danger(error instanceof Error ? error.message : String(error));
   });
   if (agentWebClient && !runtimeHasBeenReady && !runtimeHost.ready) {
+    const retryRuntime = () => {
+      window.dispatchEvent(new Event(RUNTIME_STATUS_RETRY_EVENT));
+    };
     return (
       <main className="welcome">
         <div className="welcome-access-state" role="status">
           {runtimeHost.phase === "probing" ? (
-            <OctopusLoadingState className="app-loading-state" label="Checking Agent runtime" />
+            <OctopusLoadingState
+              actionLabel={runtimeHost.error ? "Retry now" : undefined}
+              className="app-loading-state"
+              detail={runtimeHost.error ? `Reconnecting to Agent runtime… (${runtimeHost.error})` : "Checking Agent runtime…"}
+              label="Checking Agent runtime"
+              onAction={runtimeHost.error ? retryRuntime : undefined}
+            />
           ) : (
             <>
               <strong>{runtimeHost.phase === "setup_required" ? "Agent Home is not ready" : "Agent runtime is unavailable"}</strong>
               <span>{runtimeHost.error}</span>
               {runtimeHost.phase === "setup_required" && <span>Run <code>./octopus setup</code> on the server to configure this Home.</span>}
-              <button onClick={logOut} type="button">Sign out</button>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button onClick={retryRuntime} type="button">Retry now</button>
+                <button onClick={logOut} type="button">Sign out</button>
+              </div>
             </>
           )}
         </div>

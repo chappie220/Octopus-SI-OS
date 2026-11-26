@@ -32,12 +32,46 @@
 
       .startup-loader {
         display: flex;
+        flex-direction: column;
+        gap: 14px;
         width: 100%;
         height: 100%;
         align-items: center;
         justify-content: center;
         background: var(--startup-background);
         -webkit-app-region: drag;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+
+      .startup-loader__status {
+        margin: 0;
+        max-width: 340px;
+        padding: 0 24px;
+        color: rgb(255 255 255 / 68%);
+        font-size: 13px;
+        line-height: 1.45;
+        text-align: center;
+      }
+
+      :root.electron-light .startup-loader__status {
+        color: rgb(0 0 0 / 64%);
+      }
+
+      .startup-loader__retry {
+        height: 30px;
+        padding: 0 14px;
+        border: 0;
+        border-radius: 999px;
+        background: rgb(255 255 255 / 14%);
+        color: rgb(255 255 255 / 92%);
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        -webkit-app-region: no-drag;
+      }
+
+      .startup-loader__retry:hover {
+        background: rgb(255 255 255 / 22%);
       }
 
       .startup-loader__logo {
@@ -116,13 +150,16 @@
   </head>
   <body>
     <div id="root">
-      <div aria-hidden="true" class="startup-loader">
-        <div class="startup-loader__logo">
+      <div class="startup-loader">
+        <div aria-hidden="true" class="startup-loader__logo">
           <img alt="" class="startup-loader__base" src="./octopus-logo.png" />
           <div class="startup-loader__overlay"></div>
         </div>
+        <p id="startup-loader-status" class="startup-loader__status" role="status" hidden></p>
+        <button id="startup-loader-retry" class="startup-loader__retry" type="button" hidden>Retry now</button>
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
+    <script defer src="./boot-watchdog.js"></script>
   </body>
 </html>

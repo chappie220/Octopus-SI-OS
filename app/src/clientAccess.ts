@@ -1,4 +1,10 @@
 import { isWebClient } from "./webClient";
+import {
+  fetchWithRetry,
+  fetchWithTimeout,
+  readJsonSafely,
+  type FetchRetryInfo,
+} from "./resilientTransport";
 import type {
   OctopusAdministratorAccessUpdate,
   OctopusClientAccessDetails,
@@ -8,10 +14,70 @@ import type {
 } from "./electron";
 
 const ACCESS_URL = "/__octopus/access";
+const STATUS_TIMEOUT_MS = 8_000;
+const MUTATION_TIMEOUT_MS = 15_000;
+const unauthorizedListeners = new Set<() => void>();
 
-export async function readClientAccessStatus(): Promise<OctopusClientAccessStatus> {
+export function onClientAccessUnauthorized(listener: () => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => {
+    unauthorizedListeners.delete(listener);
+  };
+}
+
+export function notifyClientAccessUnauthorized(): void {
+  for (const listener of [...unauthorizedListeners]) {
+    try {
+      listener();
+    } catch {
+      // Keep notifying remaining listeners.
+    }
+  }
+}
+
+export type ReadClientAccessOptions = {
+  signal?: AbortSignal;
+  onRetry?: (info: FetchRetryInfo) => void;
+};
+
+export async function readClientAccessStatus(
+  options?: ReadClientAccessOptions,
+): Promise<OctopusClientAccessStatus> {
   if (window.octopusTransport?.accessStatus) return window.octopusTransport.accessStatus();
-  return request("status", "GET");
+  if (!isWebClient()) throw new Error("Client access host is unavailable");
+  const response = await fetchWithRetry(
+    `${ACCESS_URL}/status`,
+    {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    },
+    {
+      timeoutMs: STATUS_TIMEOUT_MS,
+      maxAttempts: 4,
+      initialDelayMs: 600,
+      maxDelayMs: 5_000,
+      signal: options?.signal,
+      onRetry: options?.onRetry,
+    },
+  );
+  if (response.status === 401) {
+    return {
+      configured: true,
+      labAvailable: false,
+      authenticated: false,
+      profile: null,
+      expiresAt: null,
+    };
+  }
+  const payload = await readJsonSafely(response);
+  if (!response.ok) {
+    throw new Error(typeof payload?.error === "string" ? payload.error : `Client access failed: HTTP ${response.status}`);
+  }
+  if (!payload) {
+    throw new Error("Client access status returned an unreadable response.");
+  }
+  return payload as unknown as OctopusClientAccessStatus;
 }
 
 export async function configureClientAccess(password: string): Promise<OctopusClientAccessStatus> {
@@ -82,16 +148,17 @@ async function request(
   body?: Record<string, unknown>,
 ): Promise<OctopusClientAccessStatus> {
   if (!isWebClient()) throw new Error("Client access host is unavailable");
-  const response = await fetch(`${ACCESS_URL}/${operation}`, {
+  const response = await fetchWithTimeout(`${ACCESS_URL}/${operation}`, {
     method,
     credentials: "same-origin",
     headers: body ? { "content-type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
-  });
-  const payload = await response.json();
+  }, MUTATION_TIMEOUT_MS);
+  const payload = await readJsonSafely(response);
   if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : `Client access failed: HTTP ${response.status}`);
-  return payload as OctopusClientAccessStatus;
+  if (!payload) throw new Error(`Client access failed: invalid response (HTTP ${response.status})`);
+  return payload as unknown as OctopusClientAccessStatus;
 }
 
 async function labRequest(
@@ -100,16 +167,18 @@ async function labRequest(
   body?: Record<string, unknown>,
 ): Promise<OctopusClientLabAccess> {
   if (!isWebClient()) throw new Error("Client access host is unavailable");
-  const response = await fetch(`${ACCESS_URL}/${operation}`, {
+  const response = await fetchWithTimeout(`${ACCESS_URL}/${operation}`, {
     method,
     credentials: "same-origin",
     headers: body ? { "content-type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
-  });
-  const payload = await response.json();
+  }, MUTATION_TIMEOUT_MS);
+  if (response.status === 401) notifyClientAccessUnauthorized();
+  const payload = await readJsonSafely(response);
   if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : `Client access failed: HTTP ${response.status}`);
-  return payload as OctopusClientLabAccess;
+  if (!payload) throw new Error(`Client access failed: invalid response (HTTP ${response.status})`);
+  return payload as unknown as OctopusClientLabAccess;
 }
 
 async function detailsRequest(
@@ -118,14 +187,16 @@ async function detailsRequest(
   body?: OctopusAdministratorAccessUpdate,
 ): Promise<OctopusClientAccessDetails> {
   if (!isWebClient()) throw new Error("Client access host is unavailable");
-  const response = await fetch(`${ACCESS_URL}/${operation}`, {
+  const response = await fetchWithTimeout(`${ACCESS_URL}/${operation}`, {
     method,
     credentials: "same-origin",
     headers: body ? { "content-type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
-  });
-  const payload = await response.json();
+  }, MUTATION_TIMEOUT_MS);
+  if (response.status === 401) notifyClientAccessUnauthorized();
+  const payload = await readJsonSafely(response);
   if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : `Client access failed: HTTP ${response.status}`);
-  return payload as OctopusClientAccessDetails;
+  if (!payload) throw new Error(`Client access failed: invalid response (HTTP ${response.status})`);
+  return payload as unknown as OctopusClientAccessDetails;
 }

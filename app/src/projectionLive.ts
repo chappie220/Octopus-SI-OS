@@ -1,4 +1,6 @@
 import { isWebClient } from "./webClient";
+import { notifyClientAccessUnauthorized } from "./clientAccess";
+import { createReconnectingEventSource } from "./resilientTransport";
 import { useSyncExternalStore } from "react";
 import type { OctopusProjectionChange } from "./electron";
 
@@ -9,7 +11,7 @@ const initialProjectionChange: OctopusProjectionChange = { generation: 0, kind: 
 let projectionChange = initialProjectionChange;
 let attached = false;
 let detachProjectionChange: (() => void) | null = null;
-let eventSource: EventSource | null = null;
+let detachEventSource: (() => void) | null = null;
 const listeners = new Set<() => void>();
 
 function bump(next: unknown): void {
@@ -35,14 +37,19 @@ function attach(): void {
   if (bridge?.onProjectionChanged) {
     detachProjectionChange = bridge.onProjectionChanged((change) => bump(change));
   } else if (isWebClient() && typeof EventSource === "function") {
-    eventSource = new EventSource("/__octopus/events");
-    eventSource.onmessage = (event) => {
-      try {
-        bump(JSON.parse(event.data));
-      } catch {
+    detachEventSource = createReconnectingEventSource("/__octopus/events", {
+      onMessage: (event) => {
+        try {
+          bump(JSON.parse(event.data));
+        } catch {
+          bump(undefined);
+        }
+      },
+      onReconnect: () => {
         bump(undefined);
-      }
-    };
+      },
+      onAuthError: notifyClientAccessUnauthorized,
+    });
   }
 }
 
@@ -51,8 +58,8 @@ function detach(): void {
   attached = false;
   detachProjectionChange?.();
   detachProjectionChange = null;
-  eventSource?.close();
-  eventSource = null;
+  detachEventSource?.();
+  detachEventSource = null;
 }
 
 export function subscribeProjectionChanges(listener: () => void): () => void {

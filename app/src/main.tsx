@@ -38,6 +38,13 @@ if (windowTransport) {
   windowTransport.onWindowStateChanged(applyWindowState);
 }
 
+(window as Window & { __octopusBootMounted?: boolean }).__octopusBootMounted = true;
+try {
+  window.sessionStorage.removeItem("octopus_boot_retries");
+} catch {
+  // Ignore unavailable sessionStorage in restricted browser contexts.
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <RendererFailureBoundary>
