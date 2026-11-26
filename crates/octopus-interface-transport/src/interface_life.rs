@@ -2921,7 +2921,7 @@ fn validate_retained_delivery_id(delivery_id: &str) -> Result<(), String> {
 }
 
 pub fn spawn_process_life(
-    ctx: InterfaceLiftContext,
+    mut ctx: InterfaceLiftContext,
     config: SpawnLifeConfig,
 ) -> InterfaceLifeFuture {
     Box::pin(async move {
@@ -2958,6 +2958,7 @@ pub fn spawn_process_life(
             .into_iter()
             .flatten()
             .collect::<BTreeSet<_>>();
+        drop(descriptor);
         let private_environment = Arc::new(read_interface_private_environment(
             &ctx,
             &declared_private_environment_names,
@@ -3021,6 +3022,9 @@ pub fn spawn_process_life(
                 .await
             });
         }
+        ctx.descriptor_snapshot = None;
+        drop(private_environment);
+        drop(private_environment_root_slot);
         if processes.is_empty() {
             ctx.cancel.cancelled().await;
             return Ok(());
@@ -3096,7 +3100,7 @@ fn spawned_life_task_error(
 }
 
 fn spawn_process_command_life(
-    ctx: InterfaceLiftContext,
+    mut ctx: InterfaceLiftContext,
     command_config: SpawnLifeCommand,
     private_environment: Arc<BTreeMap<String, String>>,
     private_environment_root_slot: Option<String>,
@@ -3121,6 +3125,12 @@ fn spawn_process_command_life(
                 var_dir.display()
             )
         })?;
+        // Release spawn-only state (resolved interface descriptor, command
+        // env/args, authority config) before awaiting the long-lived child.
+        let (mut child, _prepared_lease, _child_ownership, host_io_limits, started_at) = {
+            let command_config = command_config;
+            let private_environment = private_environment;
+            let private_environment_root_slot = private_environment_root_slot;
         ensure_private_environment_owner_dir(
             &var_dir,
             ctx.interface.as_str(),
@@ -3264,6 +3274,7 @@ fn spawn_process_command_life(
             readable_exact.push(path_with_suffix(path, "-shm"));
         }
         let resolved_interface_descriptor = ctx.resolved_interface_descriptor()?;
+        ctx.descriptor_snapshot = None;
         let additional = octopus_interfaces::additional_host_root_paths(&resolved_interface_descriptor, &ctx.root_slots)?;
         let (authority, authority_roots) = octopus_interfaces::expand_host_root_authority(&command_config.authority, &ctx.root_slots, &additional)?;
         let resolved = authority.resolve(
@@ -3311,7 +3322,7 @@ fn spawn_process_command_life(
         let host_io_limits_json = serde_json::to_string(&host_io_limits)
             .map_err(|error| format!("interface host I/O limits failed to encode: {error}"))?;
         let profile_root = life_profile_root(ctx.var_dir.parent().ok_or("interface life has no private root")?)?;
-        let prepared = resolved.authority.prepare(
+        let mut prepared = resolved.authority.prepare(
             &declared_program,
             &arguments,
             &executable_base,
@@ -3326,6 +3337,9 @@ fn spawn_process_command_life(
             return Err("interface life executable escapes its exact owner before spawn".into());
         }
         let mut command = tokio::process::Command::from(prepared.command());
+        prepared.args.clear();
+        prepared.args.shrink_to_fit();
+        let prepared_environment = std::mem::take(&mut prepared.environment);
         let child_ownership = crate::InterfaceLifeOwnership::try_acquire_life(
             ctx.var_dir.parent().ok_or("interface life has no private root")?, &ctx.interface,
         )?.ok_or("interface process lost its lifetime ownership before spawn")?;
@@ -3372,7 +3386,7 @@ fn spawn_process_command_life(
         }
         command
             .env_clear()
-            .envs(prepared.environment)
+            .envs(prepared_environment)
             .envs(environment)
             .current_dir(&executable_base)
             .env("OCTOPUS_INTERFACE_ID", ctx.interface.as_str())
@@ -3410,11 +3424,13 @@ fn spawn_process_command_life(
             tracing::warn!(error = %error, "life stderr capture retention failed");
             eprintln!("{error}");
         }
-        let mut child = LifeProcess::spawn(&mut command)
+        let child = LifeProcess::spawn(&mut command)
             .await
             .map_err(|e| format!("life spawn '{}' failed: {e}", executable.display()))?;
         #[cfg(unix)]
         drop(inherited_sockets);
+        (child, prepared, child_ownership, host_io_limits, started_at)
+        };
         let child_pid = child.id();
         let capture_sequence = STDERR_CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let stderr_path = var_dir.join(format!(

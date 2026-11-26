@@ -132,6 +132,7 @@ async fn forward_interface_activation_arrivals(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    octopus_verifiers::configure_process_memory_allocator();
     let mut args = std::env::args().skip(1);
     let command = args.next();
     if args.next().is_some() {

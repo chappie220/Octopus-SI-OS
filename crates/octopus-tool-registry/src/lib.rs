@@ -402,24 +402,24 @@ fn validate_args_schema(
             }
         }
     }
-    validate_json_schema_node(schema, 0).map_err(|error| {
+    validate_json_schema_node(schema, schema, 0).map_err(|error| {
         format!(
             "tool descriptor '{}' carries malformed args_schema: {error}",
             tool_id
         )
     })?;
-    // Compile with a local validator that is immediately dropped rather than
-    // calling `jsonschema::meta::try_validate`, whose global static Draft
-    // 2020-12 meta-schema cache retains hundreds of MiB across registry loads.
-    jsonschema::options()
-        .build(schema)
-        .map_err(|error| {
-            format!(
-                "tool descriptor '{}' carries malformed args_schema: {error}",
-                tool_id
-            )
-        })?;
     Ok(())
+}
+
+fn validate_pattern_syntax(pattern: &str) -> Result<(), String> {
+    // Validate only a flat single-keyword schema under Draft 7 so jsonschema's
+    // static meta-schema validator never recurses through Draft 2020-12
+    // `$dynamicRef` lazy caches (which otherwise retain >300 MiB permanently).
+    jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft7)
+        .build(&serde_json::json!({ "pattern": pattern }))
+        .map(|_| ())
+        .map_err(|error| format!("invalid regex pattern '{pattern}': {error}"))
 }
 
 fn is_supported_json_schema_draft(uri: &str) -> bool {
@@ -463,7 +463,11 @@ fn validate_string_array(keyword: &str, value: &serde_json::Value) -> Result<(),
     Ok(())
 }
 
-fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result<(), String> {
+fn validate_json_schema_node(
+    root: &serde_json::Value,
+    schema: &serde_json::Value,
+    depth: usize,
+) -> Result<(), String> {
     if depth > 128 {
         return Err("schema nesting exceeds maximum depth".to_string());
     }
@@ -500,12 +504,21 @@ fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result
                 }
                 _ => return Err("'type' must be a string or array of strings".to_string()),
             },
-            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+            "properties" | "$defs" | "definitions" | "dependentSchemas" => {
                 let Some(entries) = value.as_object() else {
                     return Err(format!("'{keyword}' must be an object"));
                 };
                 for child in entries.values() {
-                    validate_json_schema_node(child, depth + 1)?;
+                    validate_json_schema_node(root, child, depth + 1)?;
+                }
+            }
+            "patternProperties" => {
+                let Some(entries) = value.as_object() else {
+                    return Err("'patternProperties' must be an object".to_string());
+                };
+                for (pattern, child) in entries {
+                    validate_pattern_syntax(pattern)?;
+                    validate_json_schema_node(root, child, depth + 1)?;
                 }
             }
             "additionalProperties"
@@ -518,15 +531,15 @@ fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result
             | "propertyNames"
             | "unevaluatedProperties"
             | "unevaluatedItems" => {
-                validate_json_schema_node(value, depth + 1)?;
+                validate_json_schema_node(root, value, depth + 1)?;
             }
             "items" => match value {
                 serde_json::Value::Array(entries) => {
                     for child in entries {
-                        validate_json_schema_node(child, depth + 1)?;
+                        validate_json_schema_node(root, child, depth + 1)?;
                     }
                 }
-                _ => validate_json_schema_node(value, depth + 1)?,
+                _ => validate_json_schema_node(root, value, depth + 1)?,
             },
             "prefixItems" | "allOf" | "anyOf" | "oneOf" => {
                 let Some(entries) = value.as_array() else {
@@ -536,7 +549,7 @@ fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result
                     return Err(format!("'{keyword}' must not be empty"));
                 }
                 for child in entries {
-                    validate_json_schema_node(child, depth + 1)?;
+                    validate_json_schema_node(root, child, depth + 1)?;
                 }
             }
             "required" => validate_string_array("required", value)?,
@@ -583,9 +596,26 @@ fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result
                     return Err(format!("'{keyword}' must be a boolean"));
                 }
             }
-            "pattern"
-            | "$schema"
-            | "$ref"
+            "pattern" => {
+                let Some(pattern) = value.as_str() else {
+                    return Err("'pattern' must be a string".to_string());
+                };
+                validate_pattern_syntax(pattern)?;
+            }
+            "$ref" => {
+                let Some(reference) = value.as_str() else {
+                    return Err("'$ref' must be a string".to_string());
+                };
+                if let Some(pointer) = reference.strip_prefix('#') {
+                    if pointer.starts_with('/')
+                        && !pointer.contains('%')
+                        && root.pointer(pointer).is_none()
+                    {
+                        return Err(format!("unresolved local $ref '{reference}'"));
+                    }
+                }
+            }
+            "$schema"
             | "$dynamicRef"
             | "$id"
             | "$anchor"
@@ -616,7 +646,7 @@ fn validate_json_schema_node(schema: &serde_json::Value, depth: usize) -> Result
                     if entry.is_array() {
                         validate_string_array("dependencies", entry)?;
                     } else {
-                        validate_json_schema_node(entry, depth + 1)?;
+                        validate_json_schema_node(root, entry, depth + 1)?;
                     }
                 }
             }

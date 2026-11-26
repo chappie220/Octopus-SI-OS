@@ -3,6 +3,12 @@ pub mod process_authority;
 #[cfg(target_os = "linux")]
 mod linux_process;
 
+/// Configure platform allocator arena limits early in process startup.
+pub fn configure_process_memory_allocator() {
+    #[cfg(target_os = "linux")]
+    linux_process::configure_process_memory_allocator();
+}
+
 /// Hint the platform allocator to return freed startup/burst pages to the OS.
 pub fn trim_process_memory() {
     #[cfg(target_os = "linux")]

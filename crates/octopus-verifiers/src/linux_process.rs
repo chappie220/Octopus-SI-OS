@@ -375,6 +375,15 @@ unsafe fn read_one(fd: libc::c_int, byte: &mut [u8; 1]) -> std::io::Result<()> {
     }
 }
 
+pub(crate) fn configure_process_memory_allocator() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        // Cap glibc per-thread malloc arenas so bursts on Tokio worker threads
+        // do not retain dozens of fragmented 64 MiB arenas on constrained hosts.
+        let _ = libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
+}
+
 pub(crate) fn trim_process_memory() {
     #[cfg(target_env = "gnu")]
     unsafe {
