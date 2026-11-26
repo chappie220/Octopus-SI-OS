@@ -6,12 +6,14 @@
 
   var settled = false;
   var slowTimer = null;
+  var retryButtonTimer = null;
   var stallTimer = null;
   var autoReloadTimer = null;
 
   function cleanup() {
     settled = true;
     if (slowTimer) window.clearTimeout(slowTimer);
+    if (retryButtonTimer) window.clearTimeout(retryButtonTimer);
     if (stallTimer) window.clearTimeout(stallTimer);
     if (autoReloadTimer) window.clearTimeout(autoReloadTimer);
     window.removeEventListener("error", onResourceError, true);
@@ -80,10 +82,14 @@
   window.addEventListener("online", onOnline);
 
   slowTimer = window.setTimeout(function () {
-    showStatus("Connecting to Octopus…", false);
+    showStatus("Loading Octopus…", false);
   }, 5000);
+
+  retryButtonTimer = window.setTimeout(function () {
+    showStatus("Still loading on a slow connection…", true);
+  }, 15000);
 
   stallTimer = window.setTimeout(function () {
     scheduleReload();
-  }, 20000);
+  }, 45000);
 })();
