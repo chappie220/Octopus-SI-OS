@@ -4,13 +4,13 @@ import type { OctopusClientAccessStatus } from "./electron";
 
 const AUTO_RETRY_INTERVAL_MS = 5_000;
 
-export function useClientAccess() {
-  const [access, updateAccess] = useState<OctopusClientAccessStatus | null>(null);
+export function useClientAccess(initialAccess: OctopusClientAccessStatus | null = null) {
+  const [access, updateAccess] = useState<OctopusClientAccessStatus | null>(initialAccess);
   const [accessError, setAccessError] = useState("");
   const [accessAttempt, setAccessAttempt] = useState(1);
   const [accessRetryReason, setAccessRetryReason] = useState("");
   const generation = useRef(0);
-  const accessRef = useRef<OctopusClientAccessStatus | null>(null);
+  const accessRef = useRef<OctopusClientAccessStatus | null>(initialAccess);
   const activeAbort = useRef<AbortController | null>(null);
   const retryTimer = useRef<number | null>(null);
 

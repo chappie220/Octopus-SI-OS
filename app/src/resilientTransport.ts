@@ -1,3 +1,5 @@
+import { lazy, type ComponentType, type LazyExoticComponent } from "react";
+
 export type FetchRetryInfo = {
   attempt: number;
   maxAttempts: number;
@@ -311,4 +313,23 @@ export function createReconnectingEventSource(
       document.removeEventListener("visibilitychange", onVisibilityChange);
     }
   };
+}
+
+export function lazyWithRetry<T extends ComponentType<any>>(
+  loader: () => Promise<{ default: T }>,
+  maxAttempts = 4,
+): LazyExoticComponent<T> {
+  return lazy(async () => {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await loader();
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxAttempts) throw error;
+        await waitForRetryDelay(backoffDelayMs(attempt, 1_000, 6_000));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Failed to load application module");
+  });
 }

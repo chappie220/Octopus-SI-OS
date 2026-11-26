@@ -31,8 +31,8 @@ export class RendererFailureBoundary extends Component<{ children: ReactNode }, 
     if (!error) return this.props.children;
     const detail = `${error.stack || error.message}\n${componentStack}`.trim();
     return (
-      <main className="fixed inset-0 flex items-center justify-center bg-token-main-surface-primary px-6 text-token-foreground">
-        <div className="flex w-full max-w-md flex-col items-center gap-3 text-center">
+      <main className="renderer-failure-screen fixed inset-0 flex items-center justify-center bg-token-main-surface-primary px-6 text-token-foreground">
+        <div className="renderer-failure-card flex w-full max-w-md flex-col items-center gap-3 text-center">
           <h1 className="m-0 text-base font-medium">This surface stopped rendering</h1>
           <p className="m-0 text-sm leading-5 text-token-text-secondary">Runtime evidence was not changed. Reload the client, or copy the renderer details for diagnosis.</p>
           <p className="m-0 max-w-full truncate font-mono text-xs leading-4 text-token-description-foreground" title={error.message}>{error.message}</p>

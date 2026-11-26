@@ -34,7 +34,23 @@ export default defineConfig({
     },
   }],
   worker: { format: "es" },
-  build: { rollupOptions: { input: { main: path.resolve(APP_DIR, "index.html"), support: path.resolve(APP_DIR, "support.html") } } },
+  build: {
+    rollupOptions: {
+      input: { main: path.resolve(APP_DIR, "index.html"), support: path.resolve(APP_DIR, "support.html") },
+      output: {
+        manualChunks(id) {
+          if (
+            id.includes("/node_modules/react/")
+            || id.includes("/node_modules/react-dom/")
+            || id.includes("/node_modules/scheduler/")
+          ) {
+            return "react-vendor";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   server: { host: "127.0.0.1", port: 5174, fs: { strict: true, allow: [APP_DIR] } },
   preview: { host: "127.0.0.1", port: 4174 },
 });

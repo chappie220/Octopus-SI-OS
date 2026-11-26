@@ -35,10 +35,10 @@ let recordedOnboardingVisit: OnboardingState | null = null;
 const LOCK_TOUCH_ID_FRAMES = ["./octopus-lock.png", "./octopus-fingerprint.png"];
 const LOCK_TOUCH_ID_FRAME_SCALES = [1, 2 / 3];
 
-export function App() {
+export function App({ initialAccess = null }: { initialAccess?: OctopusClientAccessStatus | null } = {}) {
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(() => initializeOnboarding());
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
-  const { access, accessError, accessAttempt = 1, accessRetryReason = "", retryAccess, setAccess } = useClientAccess();
+  const { access, accessError, accessAttempt = 1, accessRetryReason = "", retryAccess, setAccess } = useClientAccess(initialAccess);
   const agentWebClient = isAgentWebClient();
   const runtimeHost = useRuntimeHost(access?.profile);
   const [slowAccessWait, setSlowAccessWait] = useState(false);

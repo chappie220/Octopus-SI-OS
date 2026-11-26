@@ -56,12 +56,12 @@ export function OctopusLoadingState({
       className={className || undefined}
       role="status"
     >
-      <div className="flex flex-col items-center gap-3 px-6 text-center">
+      <div className="octopus-loading-state-inner">
         <OctopusLoadingLogo />
-        {detail && <span className="max-w-sm text-xs leading-5 text-token-text-secondary">{detail}</span>}
+        {detail && <span className="octopus-loading-detail">{detail}</span>}
         {actionLabel && onAction && (
           <button
-            className="no-drag mt-1 rounded-full bg-token-list-hover-background px-3.5 py-1.5 text-xs text-token-foreground cursor-pointer border-0"
+            className="octopus-loading-action"
             onClick={onAction}
             type="button"
           >
