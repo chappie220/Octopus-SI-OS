@@ -3,12 +3,14 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use octopus_app_server::arrival::is_outbound_tail_refusal;
+#[cfg(test)]
+use octopus_app_server::build_embedded_spine;
 use octopus_app_server::{
     EmbeddedRuntime, InterfaceArtifactArrivalAdmissionError, InterfaceArtifactFile,
     SharedBlobHandle, SharedBlobs, SpineRootConfig, admit_interface_artifact_arrival,
     admit_retained_interface_artifact_arrival,
     admit_system_interface_emission, admit_system_interface_reference_emission,
-    build_embedded_spine, recover_durable_checkpoint_outbound_tail,
+    build_embedded_spine_with_progress, recover_durable_checkpoint_outbound_tail,
 };
 use octopus_descriptors::{ArtifactId, CheckpointId, InterfaceId, RunId};
 use octopus_ee::EeTree;
@@ -48,6 +50,7 @@ pub enum DaemonBootEvent {
         deferred_refusals: usize,
     },
     SpineOpening,
+    SpineProgress(&'static str),
     SpineReady,
     CheckpointsReconstructing,
     CheckpointsReconstructed,
@@ -393,14 +396,14 @@ pub(crate) async fn run_daemon_on_dirs(
     publish_boot_event(&boot_events, DaemonBootEvent::SpineOpening);
     tokio::task::yield_now().await;
     let embedded = std::sync::Arc::new(
-        build_embedded_spine(SpineRootConfig {
+        build_embedded_spine_with_progress(SpineRootConfig {
             registry_root: root.clone(),
             run: RunId::new(DAEMON_BOOT_RUN_ID),
             blobs: blobs.clone(),
             interface_artifact_root,
             run_records_root: run_records_dir.clone(),
             ee_instances_root: ee_instances_dir.clone(),
-        })
+        }, |stage| publish_boot_event(&boot_events, DaemonBootEvent::SpineProgress(stage)))
         .await?,
     );
     publish_boot_event(&boot_events, DaemonBootEvent::SpineReady);
@@ -765,6 +768,8 @@ fn publish_boot_event(
         let memory_kib = match event {
             DaemonBootEvent::LedgerOpening { .. }
             | DaemonBootEvent::LedgerProjected { .. }
+            | DaemonBootEvent::SpineOpening
+            | DaemonBootEvent::SpineProgress(_)
             | DaemonBootEvent::SpineReady
             | DaemonBootEvent::CheckpointsReconstructed
             | DaemonBootEvent::OutboundTailRecovered { .. }
@@ -777,7 +782,7 @@ fn publish_boot_event(
     }
 }
 
-fn boot_memory_kib() -> Option<(u64, u64)> {
+pub(crate) fn boot_memory_kib() -> Option<(u64, u64)> {
     #[cfg(target_os = "linux")]
     {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;

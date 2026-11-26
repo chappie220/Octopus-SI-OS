@@ -24,7 +24,7 @@ pub fn interface_map(
 
 pub fn attached_bindings_from_grant(
     formed: &FormedPolicy,
-    interfaces: &BTreeMap<InterfaceId, InterfaceDescriptor>,
+    interfaces: &BTreeMap<InterfaceId, impl std::borrow::Borrow<InterfaceDescriptor>>,
 ) -> Vec<AttachedInterfaceBinding> {
     formed
         .context
@@ -33,6 +33,7 @@ pub fn attached_bindings_from_grant(
         .filter_map(|id| {
             interfaces
                 .get(id)
+                .map(|interface| interface.borrow())
                 .map(|interface| AttachedInterfaceBinding {
                     interface: interface.id.clone(),
                     interface_type: interface.interface_type.as_label().to_string(),

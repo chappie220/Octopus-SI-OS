@@ -740,6 +740,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
                     "{initial_interface_lives} descriptor-owned life process(es) awake · {initial_interface_failures} in coma"
                 ),
             );
+            report_boot_memory(&mut boot, daemon::boot_memory_kib());
             boot.done(
                 "ready",
                 format_args!(
@@ -786,6 +787,7 @@ fn report_daemon_boot_event(boot: &mut boot_report::BootReport, progress: daemon
         daemon::DaemonBootEvent::SpineOpening => {
             boot.stage("spine", "opening embedded runtime");
         }
+        daemon::DaemonBootEvent::SpineProgress(stage) => boot.stage("spine", stage),
         daemon::DaemonBootEvent::SpineReady => {
             boot.stage("spine", "embedded runtime ready");
         }
@@ -823,7 +825,11 @@ fn report_daemon_boot_event(boot: &mut boot_report::BootReport, progress: daemon
             format_args!("{durable_runs} durable run(s) · {ee_scopes} EE scope(s)"),
         ),
     }
-    if let Some((rss, peak)) = progress.memory_kib {
+    report_boot_memory(boot, progress.memory_kib);
+}
+
+fn report_boot_memory(boot: &mut boot_report::BootReport, memory_kib: Option<(u64, u64)>) {
+    if let Some((rss, peak)) = memory_kib {
         boot.stage("memory", format_args!("RSS {rss} KiB · peak {peak} KiB"));
     }
 }

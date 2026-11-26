@@ -56,6 +56,11 @@ impl DescriptorHash {
     pub fn of_bytes(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
     }
+    pub fn of_reader(reader: impl std::io::Read) -> std::io::Result<Self> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update_reader(reader)?;
+        Ok(Self(*hasher.finalize().as_bytes()))
+    }
     pub fn to_hex(&self) -> String {
         hex_lower(&self.0)
     }
