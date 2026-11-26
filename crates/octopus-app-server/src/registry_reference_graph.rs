@@ -265,6 +265,7 @@ pub(crate) struct DanglingCeilingRef {
 #[derive(Clone, Debug)]
 pub(crate) struct RegistryPackages {
     pub(crate) interfaces: Vec<(DescriptorName, InterfaceDescriptor)>,
+    pub(crate) interface_sources: BTreeMap<InterfaceId, InterfaceFormationSource>,
     pub(crate) interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
     pub(crate) worker_policies: BTreeMap<InterfaceId, WorkerInterfacePolicy>,
     pub(crate) tools: Vec<(DescriptorName, ToolDescriptor)>,
@@ -275,6 +276,30 @@ pub(crate) struct RegistryPackages {
     pub(crate) dangling_ceiling_refs: Vec<DanglingCeilingRef>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct InterfaceFormationSource {
+    path: PathBuf,
+    pub(crate) hash: DescriptorHash,
+}
+
+impl InterfaceFormationSource {
+    pub(crate) fn read(&self) -> Result<Vec<u8>, String> {
+        let bytes = std::fs::read(&self.path).map_err(|error| format!("{}: {error}", self.path.display()))?;
+        let descriptor = octopus_descriptors::parse_strict::<InterfaceDescriptor>(&bytes)
+            .map_err(|error| format!("{}: {error}", self.path.display()))?;
+        let canonical = canonical_interface_source(&descriptor)?;
+        if DescriptorHash::of_bytes(&canonical) != self.hash {
+            return Err(format!("interface formation source '{}' changed since the registry snapshot", self.path.display()));
+        }
+        Ok(canonical)
+    }
+}
+
+fn canonical_interface_source(descriptor: &InterfaceDescriptor) -> Result<Vec<u8>, String> {
+    let value = serde_json::to_value(descriptor).map_err(|error| error.to_string())?;
+    Ok(octopus_descriptors::canonical_bytes(&value))
+}
+
 struct KindLoad<T> {
     loaded: Vec<(DescriptorName, T)>,
     unavailable: BTreeMap<RegistryNode, String>,
@@ -282,10 +307,19 @@ struct KindLoad<T> {
 
 impl RegistryPackages {
     pub(crate) fn load(registry_root: &Path) -> Result<Self, String> {
-        let mut interface_load = load_kind::<InterfaceDescriptor>(
+        let mut interface_sources = BTreeMap::new();
+        let mut interface_load = load_kind_with::<InterfaceDescriptor>(
             &registry_root.join("interface"),
             RegistryNodeKind::Interface,
             false,
+            |path, descriptor| {
+                if descriptor.interface_driver_config.is_some() {
+                    let hash = DescriptorHash::of_bytes(&canonical_interface_source(descriptor)?);
+                    interface_sources.insert(descriptor.id.clone(), InterfaceFormationSource { path: path.to_path_buf(), hash });
+                    descriptor.interface_driver_config = None;
+                }
+                Ok(())
+            },
         )?;
         let tool_load = load_kind::<ToolDescriptor>(
             &registry_root.join("tool"),
@@ -408,6 +442,7 @@ impl RegistryPackages {
             .collect();
         Ok(Self {
             interfaces: interface_load.loaded,
+            interface_sources,
             interface_dispositions,
             worker_policies,
             tools,
@@ -1123,6 +1158,15 @@ fn load_kind<T: Descriptor>(
     kind: RegistryNodeKind,
     optional_root: bool,
 ) -> Result<KindLoad<T>, String> {
+    load_kind_with(root, kind, optional_root, |_, _| Ok(()))
+}
+
+fn load_kind_with<T: Descriptor>(
+    root: &Path,
+    kind: RegistryNodeKind,
+    optional_root: bool,
+    mut retain: impl FnMut(&Path, &mut T) -> Result<(), String>,
+) -> Result<KindLoad<T>, String> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if optional_root && error.kind() == std::io::ErrorKind::NotFound => {
@@ -1181,7 +1225,7 @@ fn load_kind<T: Descriptor>(
                 continue;
             }
         };
-        let descriptor = match octopus_descriptors::parse_strict::<T>(&bytes) {
+        let mut descriptor = match octopus_descriptors::parse_strict::<T>(&bytes) {
             Ok(descriptor) => descriptor,
             Err(error) => {
                 unavailable.insert(
@@ -1205,6 +1249,7 @@ fn load_kind<T: Descriptor>(
                 continue;
             }
         }
+        retain(&path, &mut descriptor)?;
         loaded.push((
             DescriptorName::new(format!("{}/{folder}", T::KIND)),
             descriptor,
@@ -1634,6 +1679,24 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("scratch path has a parent"))
             .expect("scratch dir writes");
         std::fs::write(path, body).expect("scratch file writes");
+    }
+
+    #[test]
+    fn configured_interface_keeps_only_policy_metadata_and_reads_its_pinned_source() {
+        let root = tempfile::tempdir().unwrap();
+        for kind in ["tool", "worker_environment_kind", "ee_template"] {
+            std::fs::create_dir(root.path().join(kind)).unwrap();
+        }
+        let path = root.path().join("interface/world_fixture/interface.json");
+        let source = r#"{"id":"world_fixture","interface_type":"world","role":"provider","direction":"bidirectional","source_names":["fixture"],"interface_driver_ref":"fixture","interface_driver_config":{"private_config":{"setting":"original"}}}"#;
+        write(&path, source);
+        let packages = RegistryPackages::load(root.path()).unwrap();
+        assert!(packages.interfaces[0].1.interface_driver_config.is_none());
+        let pinned = &packages.interface_sources[&InterfaceId::new("world_fixture")];
+        let descriptor: InterfaceDescriptor = serde_json::from_slice(&pinned.read().unwrap()).unwrap();
+        assert_eq!(descriptor.interface_driver_config.unwrap().private_config["setting"], "original");
+        write(&path, &source.replace("original", "changed"));
+        assert!(pinned.read().unwrap_err().contains("changed since the registry snapshot"));
     }
 
     #[test]

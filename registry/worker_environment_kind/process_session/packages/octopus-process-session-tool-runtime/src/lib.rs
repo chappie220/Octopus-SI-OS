@@ -2537,7 +2537,9 @@ impl ToolProcessClient {
         }
         let executable = prepared.executable.clone();
         let sandbox_profile = prepared.sandbox_profile.clone();
-        let (command, describe_spawn_error) = prepared.command_with_spawn_diagnostics();
+        let (command, describe_spawn_error) = prepared
+            .command_with_spawn_diagnostics(&executable_base)
+            .map_err(ToolProcessInvokeError::Unavailable)?;
         let mut command = tokio::process::Command::from(command);
         #[cfg(unix)]
         command.process_group(0);
@@ -2546,7 +2548,6 @@ impl ToolProcessClient {
             .env_clear()
             .envs(prepared.environment)
             .envs(environment)
-            .current_dir(&executable_base)
             .env("OCTOPUS_INTERFACE_ID", ctx.interface.as_str())
             .env("OCTOPUS_INTERFACE_DIR", ctx.interface_registry_dir())
             .env(RESOLVED_INTERFACE_DESCRIPTOR_ENV, interface_descriptor_json)

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -32,25 +33,31 @@ use octopus_worker_env::WorkerEnvKindSpec;
 
 use octopus_interface_projection::{
     InterfaceToolAffordance, InterfaceToolDescriptionView, InterfaceToolOwnerMap,
-    attached_bindings_from_grant, interface_map, interface_metadata_projection_body,
+    attached_bindings_from_grant, interface_metadata_projection_body,
     project_interface_tool_affordances,
 };
 pub use octopus_ledger::SharedBlobs;
 
 use crate::context_artifact_cache::RegistryContextArtifactCache;
 use crate::registry_reference_graph::{
-    ActivationReferenceSet, RegistryNode, RegistryPackages, RegistryReferenceGraph,
+    ActivationReferenceSet, InterfaceFormationSource, RegistryNode, RegistryPackages, RegistryReferenceGraph,
 };
 
 #[path = "spine_root/commit.rs"]
 mod commit;
 
+type LoadedInterfaces = Arc<Vec<(DescriptorName, Arc<InterfaceDescriptor>)>>;
+
+fn share_interfaces(interfaces: Vec<(DescriptorName, InterfaceDescriptor)>) -> LoadedInterfaces {
+    Arc::new(interfaces.into_iter().map(|(name, descriptor)| (name, Arc::new(descriptor))).collect())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LoadedRegistrySnapshot {
-    interfaces_loaded: Vec<(DescriptorName, InterfaceDescriptor)>,
-    interfaces_by_id: BTreeMap<InterfaceId, InterfaceDescriptor>,
+    interfaces_loaded: LoadedInterfaces,
+    interfaces_by_id: BTreeMap<InterfaceId, Arc<InterfaceDescriptor>>,
     interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
-    worker_interface_policies: BTreeMap<InterfaceId, WorkerInterfacePolicy>,
+    worker_interface_policies: Arc<BTreeMap<InterfaceId, WorkerInterfacePolicy>>,
     tool_descriptions: RegistryToolDescriptions,
     tool_ownership: InterfaceToolOwnerMap,
     tool_supported_weks: BTreeMap<ToolId, BTreeSet<WorkerEnvironmentKindId>>,
@@ -59,9 +66,20 @@ pub(crate) struct LoadedRegistrySnapshot {
     ee_tree: EeTree,
     copy_lineage: CopyLineage,
     formation_source_hashes: BTreeMap<DescriptorName, DescriptorHash>,
-    formation_source_bytes: BTreeMap<DescriptorName, Vec<u8>>,
+    formation_sources: BTreeMap<DescriptorName, FormationSource>,
     ee_instance_issues: Vec<String>,
     source_file_hashes: Arc<BTreeMap<PathBuf, ContentHash>>,
+}
+
+#[derive(Clone, Debug)]
+enum FormationSource {
+    Ee(EeId),
+    Interface(InterfaceId),
+    ConfiguredInterface(InterfaceFormationSource),
+    Worker(InterfaceId),
+    Tool(ToolId),
+    EnvironmentKind(Box<WorkerEnvKindSpec>),
+    EeTemplate(Box<EeTemplateDescriptor>),
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -222,7 +240,7 @@ fn registry_descriptor_fingerprint(
             cached.observed = true;
             cached.content_hash
         } else {
-            let content_hash = ContentHash::of_bytes(&std::fs::read(&path)?);
+            let content_hash = ContentHash::of_reader(std::fs::File::open(&path)?)?;
             files.0.insert(path.clone(), RegistryFileObservation {
                 stamp, settled, content_hash, observed: true,
             });
@@ -603,22 +621,17 @@ pub(crate) fn validate_registry_run_contracts(
     Ok((issues, dependencies, available_ee))
 }
 
-fn insert_formation_source(
-    hashes: &mut BTreeMap<DescriptorName, DescriptorHash>,
-    sources: &mut BTreeMap<DescriptorName, Vec<u8>>,
-    name: DescriptorName,
+fn encode_formation_source(
+    name: &DescriptorName,
     value: &impl serde::Serialize,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let value = serde_json::to_value(value).map_err(|error| {
         format!(
             "formation source '{}' could not be encoded: {error}",
             name.as_str()
         )
     })?;
-    let bytes = octopus_descriptors::canonical_bytes(&value);
-    hashes.insert(name.clone(), DescriptorHash::of_bytes(&bytes));
-    sources.insert(name, bytes);
-    Ok(())
+    Ok(octopus_descriptors::canonical_bytes(&value))
 }
 
 impl RunGrantResolver for RegistryRunGrantResolver {
@@ -705,9 +718,10 @@ impl LoadedRegistrySnapshot {
     }
 
     fn from_loaded(
-        interfaces_loaded: Vec<(DescriptorName, InterfaceDescriptor)>,
+        interfaces_loaded: LoadedInterfaces,
+        mut interface_sources: BTreeMap<InterfaceId, InterfaceFormationSource>,
         interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
-        worker_interface_policies: BTreeMap<InterfaceId, WorkerInterfacePolicy>,
+        worker_interface_policies: Arc<BTreeMap<InterfaceId, WorkerInterfacePolicy>>,
         tool_descriptors_loaded: Vec<(DescriptorName, ToolDescriptor)>,
         worker_environment_kinds_loaded: Vec<(DescriptorName, WorkerEnvKindSpec)>,
         reference_graph: RegistryReferenceGraph,
@@ -715,7 +729,9 @@ impl LoadedRegistrySnapshot {
         ee_templates: &[(DescriptorName, EeTemplateDescriptor)],
         ee_instance_issues: Vec<String>,
     ) -> Result<Self, String> {
-        let interfaces_by_id = interface_map(&interfaces_loaded);
+        let interfaces_by_id: BTreeMap<_, _> = interfaces_loaded.iter()
+            .map(|(_, descriptor)| (descriptor.id.clone(), Arc::clone(descriptor)))
+            .collect();
         let tool_descriptions = RegistryToolDescriptions::from_loaded(&tool_descriptors_loaded);
         let tool_ownership = tool_descriptions.owner_map();
         let tool_supported_weks = tool_descriptors_loaded
@@ -736,7 +752,7 @@ impl LoadedRegistrySnapshot {
             .map(|(_, descriptor)| descriptor.worker_environment_kind_id.clone())
             .collect();
         let mut copy_lineage = CopyLineage::default();
-        for (_, descriptor) in &interfaces_loaded {
+        for (_, descriptor) in interfaces_loaded.iter() {
             if let Some(original) = descriptor.copy_of.as_ref().filter(|original| interfaces_by_id.contains_key(*original)) {
                 copy_lineage.insert_interface(descriptor.id.clone(), original.clone());
             }
@@ -750,61 +766,49 @@ impl LoadedRegistrySnapshot {
                 copy_lineage.insert_declared_tool(ToolId::new(descriptor.id.as_str()), original);
             }
         }
-        let mut formation_source_hashes = BTreeMap::new();
-        let mut formation_source_bytes = BTreeMap::new();
+        let mut formation_sources = BTreeMap::new();
         for (_, instance) in ee_tree.instances() {
-            insert_formation_source(
-                &mut formation_source_hashes,
-                &mut formation_source_bytes,
+            formation_sources.insert(
                 crate::worker_policy::ee_instance_source_name(&instance.ee_id),
-                instance,
-            )?;
+                FormationSource::Ee(instance.ee_id.clone()),
+            );
         }
-        for (_, descriptor) in &interfaces_loaded {
-            insert_formation_source(
-                &mut formation_source_hashes,
-                &mut formation_source_bytes,
+        for (_, descriptor) in interfaces_loaded.iter() {
+            let source = interface_sources.remove(&descriptor.id)
+                .map(FormationSource::ConfiguredInterface)
+                .unwrap_or_else(|| FormationSource::Interface(descriptor.id.clone()));
+            formation_sources.insert(
                 crate::worker_policy::interface_descriptor_source_name(&descriptor.id),
-                descriptor,
-            )?;
+                source,
+            );
         }
-        for (worker, policy) in &worker_interface_policies {
-            insert_formation_source(
-                &mut formation_source_hashes,
-                &mut formation_source_bytes,
+        for worker in worker_interface_policies.keys() {
+            formation_sources.insert(
                 crate::worker_policy::worker_interface_descriptor_name(worker),
-                policy,
-            )?;
+                FormationSource::Worker(worker.clone()),
+            );
         }
-        for (_, descriptor) in &tool_descriptors_loaded {
-            insert_formation_source(
-                &mut formation_source_hashes,
-                &mut formation_source_bytes,
-                crate::worker_policy::tool_descriptor_source_name(&ToolId::new(
-                    descriptor.id.as_str(),
-                )),
-                descriptor,
-            )?;
+        for tool in tool_descriptions.by_tool.keys() {
+            formation_sources.insert(
+                crate::worker_policy::tool_descriptor_source_name(tool),
+                FormationSource::Tool(tool.clone()),
+            );
         }
-        for (_, descriptor) in &worker_environment_kinds_loaded {
-            insert_formation_source(
-                &mut formation_source_hashes,
-                &mut formation_source_bytes,
+        for (_, descriptor) in worker_environment_kinds_loaded {
+            formation_sources.insert(
                 crate::worker_policy::worker_environment_kind_source_name(
                     &descriptor.worker_environment_kind_id,
                 ),
-                descriptor,
-            )?;
+                FormationSource::EnvironmentKind(Box::new(descriptor)),
+            );
         }
         for (_, template) in ee_templates {
-            insert_formation_source(
-                &mut formation_source_hashes,
-                &mut formation_source_bytes,
+            formation_sources.insert(
                 crate::worker_policy::ee_template_source_name(template.id.as_str()),
-                template,
-            )?;
+                FormationSource::EeTemplate(Box::new(template.clone())),
+            );
         }
-        Ok(Self {
+        let mut snapshot = Self {
             interfaces_loaded,
             interfaces_by_id,
             interface_dispositions,
@@ -816,11 +820,32 @@ impl LoadedRegistrySnapshot {
             reference_graph,
             ee_tree,
             copy_lineage,
-            formation_source_hashes,
-            formation_source_bytes,
+            formation_source_hashes: BTreeMap::new(),
+            formation_sources,
             ee_instance_issues,
             source_file_hashes: Arc::new(BTreeMap::new()),
-        })
+        };
+        snapshot.formation_source_hashes = snapshot.formation_sources.iter().map(|(name, source)| {
+            let hash = match source {
+                FormationSource::ConfiguredInterface(source) => source.hash,
+                _ => DescriptorHash::of_bytes(&snapshot.formation_source_bytes(name, source)?),
+            };
+            Ok((name.clone(), hash))
+        }).collect::<Result<_, String>>()?;
+        Ok(snapshot)
+    }
+
+    fn formation_source_bytes(&self, name: &DescriptorName, source: &FormationSource) -> Result<Vec<u8>, String> {
+        let missing = || format!("formation input '{}' has no normalized source", name.as_str());
+        match source {
+            FormationSource::Ee(id) => encode_formation_source(name, self.ee_tree.get(id).ok_or_else(missing)?),
+            FormationSource::Interface(id) => encode_formation_source(name, self.interfaces_by_id.get(id).ok_or_else(missing)?.as_ref()),
+            FormationSource::ConfiguredInterface(source) => source.read(),
+            FormationSource::Worker(id) => encode_formation_source(name, self.worker_interface_policies.get(id).ok_or_else(missing)?),
+            FormationSource::Tool(id) => encode_formation_source(name, self.tool_descriptions.by_tool.get(id).ok_or_else(missing)?),
+            FormationSource::EnvironmentKind(descriptor) => encode_formation_source(name, descriptor.as_ref()),
+            FormationSource::EeTemplate(descriptor) => encode_formation_source(name, descriptor.as_ref()),
+        }
     }
 
     fn retain_formation_inputs(
@@ -838,18 +863,17 @@ impl LoadedRegistrySnapshot {
         }
         let mut contents = Vec::with_capacity(pin.inputs.len());
         for (name, hash) in &pin.inputs {
-            let bytes = self
-                .formation_source_bytes
-                .get(name)
-                .map(Vec::as_slice)
-                .or_else(|| role_sources.get(name).copied())
-                .ok_or_else(|| {
+            let bytes = if let Some(source) = self.formation_sources.get(name) {
+                Cow::Owned(self.formation_source_bytes(name, source)?)
+            } else {
+                Cow::Borrowed(role_sources.get(name).copied().ok_or_else(|| {
                     format!(
                         "formation input '{}' has no normalized source bytes",
                         name.as_str()
                     )
-                })?;
-            if DescriptorHash::of_bytes(bytes) != *hash {
+                })?)
+            };
+            if DescriptorHash::of_bytes(&bytes) != *hash {
                 return Err(format!(
                     "formation input '{}' differs from its pinned hash",
                     name.as_str()
@@ -857,11 +881,12 @@ impl LoadedRegistrySnapshot {
             }
             contents.push(bytes);
         }
-        let stored = blobs.put_batch(&contents);
+        let sources = contents.iter().map(|bytes| bytes.as_ref()).collect::<Vec<_>>();
+        let stored = blobs.put_batch(&sources);
         if stored.len() != contents.len() {
             return Err("formation input batch returned an incomplete set of hashes".into());
         }
-        for (((name, _), bytes), actual) in pin.inputs.iter().zip(contents).zip(stored) {
+        for (((name, _), bytes), actual) in pin.inputs.iter().zip(sources).zip(stored) {
             let expected = ContentHash::of_bytes(bytes);
             if actual != expected || blobs.get(&expected).as_deref() != Some(bytes) {
                 return Err(format!(
@@ -1181,9 +1206,10 @@ impl LoadedRegistrySnapshot {
         )?;
         ee_instances.issues.append(&mut topology_issues);
         Self::from_loaded(
-            packages.interfaces,
+            share_interfaces(packages.interfaces),
+            packages.interface_sources,
             packages.interface_dispositions,
-            packages.worker_policies,
+            Arc::new(packages.worker_policies),
             packages.tools,
             packages.worker_environment_kinds,
             packages.graph,
@@ -1292,7 +1318,7 @@ impl LoadedRegistrySnapshot {
             .policy_layers_omitting_instance_narrowing(ee, None)
             .map_err(|error| format!("EE '{}' policy chain failed: {error}", ee.as_str()))?;
         let mut workers = Vec::new();
-        for (worker, worker_policy) in &self.worker_interface_policies {
+        for (worker, worker_policy) in self.worker_interface_policies.iter() {
             if !allowed_interfaces.contains(worker) {
                 continue;
             }
@@ -1357,7 +1383,7 @@ fn validate_worker_interface_policy_scope(
 
 fn form_interface_policy_for_interface(
     interface: &InterfaceId,
-    by_id: &BTreeMap<InterfaceId, InterfaceDescriptor>,
+    by_id: &BTreeMap<InterfaceId, Arc<InterfaceDescriptor>>,
     worker_layers: &[&octopus_policy::InterfacePolicyOverrideLayer],
     original: Option<&InterfaceId>,
     override_layers: &[octopus_policy::InterfacePolicyOverrideLayer],
@@ -1624,8 +1650,8 @@ pub struct EmbeddedRuntime {
     pub run_records_root: PathBuf,
     pub ee_instances_root: PathBuf,
     pub blobs: SharedBlobs,
-    pub interfaces_loaded: Vec<(octopus_descriptors::DescriptorName, InterfaceDescriptor)>,
-    pub worker_interface_policies: BTreeMap<InterfaceId, WorkerInterfacePolicy>,
+    pub interfaces_loaded: LoadedInterfaces,
+    pub worker_interface_policies: Arc<BTreeMap<InterfaceId, WorkerInterfacePolicy>>,
     pub ee_templates_loaded: Vec<(octopus_descriptors::DescriptorName, EeTemplateDescriptor)>,
     pub tool_descriptors_loaded: Vec<(octopus_descriptors::DescriptorName, ToolDescriptor)>,
     live_registry: Arc<RwLock<LoadedRegistrySnapshot>>,
@@ -1986,12 +2012,20 @@ impl PreparedVerification for PreparedRegistryVerification {
 }
 
 pub async fn build_embedded_spine(
+    config: SpineRootConfig,
+) -> Result<EmbeddedRuntime, Box<dyn std::error::Error>> {
+    build_embedded_spine_with_progress(config, |_| {}).await
+}
+
+pub async fn build_embedded_spine_with_progress(
     mut config: SpineRootConfig,
+    mut progress: impl FnMut(&'static str),
 ) -> Result<EmbeddedRuntime, Box<dyn std::error::Error>> {
     config.registry_root = std::fs::canonicalize(&config.registry_root)?;
     let root = &config.registry_root;
     let packages = RegistryPackages::load(root)
         .map_err(|error| format!("loading registry packages failed: {error}"))?;
+    progress("registry packages loaded");
     if !packages.dangling_ceiling_refs.is_empty() {
         let workers = packages
             .dangling_ceiling_refs
@@ -2009,9 +2043,11 @@ pub async fn build_embedded_spine(
         );
     }
     let mut persisted_ee_instances = load_persisted_ee_instances(&config.ee_instances_root)?;
+    progress("EE records loaded");
     let mut registry_files = RegistryFileCache::default();
     let boot_fingerprint =
         registry_descriptor_fingerprint(&config.registry_root, &config.ee_instances_root, &mut registry_files).ok();
+    progress("registry files fingerprinted");
     let (ee_tree, bootstrap_ee, mut topology_issues) = registry_ee_state(
         &packages.ee_templates,
         &packages.graph,
@@ -2023,9 +2059,9 @@ pub async fn build_embedded_spine(
     for issue in &persisted_ee_instances.issues {
         eprintln!("EE instance isolation warning: {issue}");
     }
-    let interfaces_loaded = packages.interfaces.clone();
+    let interfaces_loaded = share_interfaces(packages.interfaces);
     let interface_dispositions = packages.interface_dispositions.clone();
-    let worker_interface_policies = packages.worker_policies.clone();
+    let worker_interface_policies = Arc::new(packages.worker_policies);
     let tool_descriptors_loaded = packages.tools.clone();
     let ee_templates_loaded = packages.ee_templates.clone();
     let interface_catalog = RuntimeInterfaceCatalog::from_classes(
@@ -2052,6 +2088,7 @@ pub async fn build_embedded_spine(
 
     let loaded_registry_snapshot = LoadedRegistrySnapshot::from_loaded(
         interfaces_loaded.clone(),
+        packages.interface_sources,
         interface_dispositions,
         worker_interface_policies.clone(),
         tool_descriptors_loaded.clone(),
@@ -2062,6 +2099,7 @@ pub async fn build_embedded_spine(
         persisted_ee_instances.issues,
     )?
     .with_source_file_hashes(registry_files.content_hashes());
+    progress("policy snapshot built");
     let formation_source_hashes = loaded_registry_snapshot.formation_source_hashes.clone();
     let live_registry = Arc::new(RwLock::new(loaded_registry_snapshot));
 

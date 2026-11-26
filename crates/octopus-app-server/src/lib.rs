@@ -38,6 +38,7 @@ pub use registry_reference_graph::{
 pub mod spine_root;
 pub use spine_root::{
     EmbeddedRuntime, SharedBlobHandle, SharedBlobs, SpineRootConfig, build_embedded_spine,
+    build_embedded_spine_with_progress,
     context_artifact_content, project_ee_policies, registry_root_from_manifest,
 };
 

@@ -58,30 +58,30 @@ impl PreparedProcess {
         let mut command = self.unconfigured_command();
         #[cfg(target_os = "linux")]
         if let Some(lease) = &self.linux_lease {
-            lease.configure(&mut command, None);
+            lease.configure(&mut command, None, None);
         }
         command
     }
 
     pub fn command_with_spawn_diagnostics(
         &self,
-    ) -> (std::process::Command, impl FnOnce(std::io::Error) -> String + use<>) {
+        cwd: &Path,
+    ) -> Result<(std::process::Command, impl FnOnce(std::io::Error) -> String + use<>), String> {
+        let mut command = self.unconfigured_command();
         #[cfg(target_os = "linux")]
-        let (command, diagnostics) = match &self.linux_lease {
-            Some(lease) => match crate::linux_process::SpawnDiagnostics::new() {
-                Ok(diagnostics) => {
-                    let diagnostics = std::sync::Arc::new(diagnostics);
-                    let mut command = self.unconfigured_command();
-                    lease.configure(&mut command, Some(diagnostics.clone()));
-                    (command, Ok(Some(diagnostics)))
-                }
-                Err(error) => (self.command(), Err(error)),
-            },
-            None => (self.command(), Ok(None)),
+        let diagnostics = if let Some(lease) = &self.linux_lease {
+            let cwd = std::ffi::CString::new(cwd.as_os_str().as_encoded_bytes())
+                .map_err(|error| format!("invalid tool working directory: {error}"))?;
+            let diagnostics = crate::linux_process::SpawnDiagnostics::new().map(std::sync::Arc::new);
+            lease.configure(&mut command, diagnostics.as_ref().ok().cloned(), Some(cwd));
+            diagnostics.map(Some)
+        } else {
+            command.current_dir(cwd);
+            Ok(None)
         };
         #[cfg(not(target_os = "linux"))]
-        let command = self.command();
-        (command, move |error| {
+        command.current_dir(cwd);
+        Ok((command, move |error| {
             #[cfg(target_os = "linux")]
             match diagnostics {
                 Ok(Some(diagnostics)) => crate::linux_process::describe_spawn_error(&diagnostics, error),
@@ -90,7 +90,7 @@ impl PreparedProcess {
             }
             #[cfg(not(target_os = "linux"))]
             error.to_string()
-        })
+        }))
     }
 }
 
