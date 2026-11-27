@@ -17,6 +17,7 @@ const { configurationProjection } = require("./projection/configuration.cjs");
 const { workerEnvironmentsProjection } = require("./projection/workerEnvironments.cjs");
 const { descriptorRowsProjection } = require("./projection/descriptorRows.cjs");
 const { ledgerProjection } = require("./projection/ledger.cjs");
+const { indexedLedgerProjection } = require("./projection/indexedLedger.cjs");
 const { operatorChatIndexProjection } = require("./projection/operatorChatIndex.cjs");
 const { operatorOsProjection } = require("./projection/operatorOs.cjs");
 const { operatorChatContextProjection } = require("./projection/operatorChatContext.cjs");
@@ -66,7 +67,7 @@ function createProjectionContext(options) {
     runtimeLaunchEnvironment,
     localPackagePublication,
   };
-  for (const projection of [invalidationProjection, queryRouterProjection, movementPagesProjection, clientSurfacesProjection, interfaceArtifactsProjection, runActivityProjection, configurationProjection, workerEnvironmentsProjection, descriptorRowsProjection, ledgerProjection, operatorChatIndexProjection, operatorOsProjection, operatorChatContextProjection, operatorChatTurnsProjection, operatorChatListProjection, operatorChatMessagesProjection, scheduledInterfacesProjection, topologyRowsProjection]) {
+  for (const projection of [invalidationProjection, queryRouterProjection, movementPagesProjection, clientSurfacesProjection, interfaceArtifactsProjection, runActivityProjection, configurationProjection, workerEnvironmentsProjection, descriptorRowsProjection, ledgerProjection, indexedLedgerProjection, operatorChatIndexProjection, operatorOsProjection, operatorChatContextProjection, operatorChatTurnsProjection, operatorChatListProjection, operatorChatMessagesProjection, scheduledInterfacesProjection, topologyRowsProjection]) {
     Object.assign(store, projection(store));
   }
   store.close = () => {

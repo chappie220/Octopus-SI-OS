@@ -160,28 +160,57 @@ function operatorChatIndexProjection(store) {
     if (!index) return null;
     try {
       const rowsByRun = new Map([...runIds].map((runId) => [runId, []]));
-      const statement = index.database.prepare(
-        `SELECT
-          seq, lamport, recorded_at_unix_ms, trace, kind,
-          from_kind, from_id, to_kind, to_id,
-          artifact_id, artifact_content,
-          runtime_run, runtime_checkpoint, runtime_interface
-        FROM movements
-        WHERE runtime_run = ?
-          AND seq < ?
-          AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
-        ORDER BY seq ASC`,
+      const kindScanBound = 50_000;
+      const probeKindBound = index.database.prepare(
+        "SELECT 1 FROM movements WHERE kind = ? AND seq < ? LIMIT 1 OFFSET ?",
       );
-      for (const requestedRunId of runIds) {
+      const useKindIndex = !probeKindBound.get("InterfaceArrival", index.watermark, kindScanBound)
+        && !probeKindBound.get("InterfaceOutbound", index.watermark, kindScanBound);
+      if (useKindIndex) {
+        const statement = index.database.prepare(
+          `SELECT
+            seq, lamport, recorded_at_unix_ms, trace, kind,
+            from_kind, from_id, to_kind, to_id,
+            artifact_id, artifact_content,
+            runtime_run, runtime_checkpoint, runtime_interface
+          FROM movements
+          WHERE kind IN ('InterfaceArrival', 'InterfaceOutbound')
+            AND seq < ?
+          ORDER BY seq ASC`,
+        );
         let count = 0;
-        for (const row of statement.iterate(requestedRunId, index.watermark)) {
-          const projected = normalizeIndexedProjectionMovement(row, index.ledgerPath);
+        for (const row of statement.iterate(index.watermark)) {
           const runId = indexedMovementRunId(row);
-          if (!runIds.has(runId)) continue;
-          rowsByRun.get(runId).push(projected);
+          if (runIds.has(runId)) {
+            rowsByRun.get(runId).push(normalizeIndexedProjectionMovement(row, index.ledgerPath));
+          }
           if (++count % 256 === 0) await yieldToClient();
         }
         await yieldToClient();
+      } else {
+        const statement = index.database.prepare(
+          `SELECT
+            seq, lamport, recorded_at_unix_ms, trace, kind,
+            from_kind, from_id, to_kind, to_id,
+            artifact_id, artifact_content,
+            runtime_run, runtime_checkpoint, runtime_interface
+          FROM movements
+          WHERE runtime_run = ?
+            AND seq < ?
+            AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
+          ORDER BY seq ASC`,
+        );
+        for (const requestedRunId of runIds) {
+          let count = 0;
+          for (const row of statement.iterate(requestedRunId, index.watermark)) {
+            const projected = normalizeIndexedProjectionMovement(row, index.ledgerPath);
+            const runId = indexedMovementRunId(row);
+            if (!runIds.has(runId)) continue;
+            rowsByRun.get(runId).push(projected);
+            if (++count % 256 === 0) await yieldToClient();
+          }
+          await yieldToClient();
+        }
       }
       const tail = await readIndexedLedgerTail(
         index.ledgerPath,
