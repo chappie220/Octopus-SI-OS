@@ -1,6 +1,16 @@
 name: build-linux-alpine
 
 on:
+  push:
+    paths:
+      - ".github/workflows/build-linux-alpine.yml"
+      - "app/scripts/cli-target.cjs"
+      - "app/scripts/test-cli-target.cjs"
+      - "crates/octopus-verifiers/src/process_authority/linux.rs"
+      - "registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/**"
+      - "registry/interface/world_provider_codex/packages/octopus-shell-command/**"
+      - "registry/worker_environment_kind/filesystem_workspace/packages/octopus-applypatch/**"
+      - "registry/worker_environment_kind/filesystem_workspace/packages/octopus-system-workspace-env/**"
   workflow_dispatch:
     inputs:
       arch:
