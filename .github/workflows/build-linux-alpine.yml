@@ -40,9 +40,56 @@ jobs:
       - name: Build and verify inside Alpine Linux (musl) container
         shell: bash
         run: |
+          cat <<'BUILD_SCRIPT' > "$RUNNER_TEMP/alpine-build.sh"
+          #!/bin/sh
+          set -eux
+          cd /work
+          git config --global --add safe.directory /work
+
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --default-host "$TARGET_TRIPLE"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustc --version
+          cargo --version
+          node --version
+
+          fish -c 'printf "fish-c-ok\n"' | grep -qx 'fish-c-ok'
+          fish -lc 'printf "fish-lc-ok\n"' | grep -qx 'fish-lc-ok'
+          sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/install-linux.sh
+          sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/octopus-process-authority.openrc
+
+          node -e 'const { detectLinuxLibc, hostTarget } = require("./app/scripts/cli-target.cjs"); const libc = detectLinuxLibc(); const triple = hostTarget(); console.log({ libc, triple }); if (libc !== "musl" || triple !== process.env.TARGET_TRIPLE) process.exit(1);'
+
+          npm ci --prefix app
+          node --test app/scripts/test-cli-target.cjs app/scripts/test-indexed-ledger-projection.cjs
+
+          cargo test --locked \
+            -p octopus-linux-process-authority \
+            -p octopus-shell-command \
+            -p octopus-system-workspace-env \
+            -p octopus-applypatch
+
+          npm --prefix app run build:cli -- --target="$TARGET_TRIPLE"
+          npm --prefix app run build
+
+          runtime=app/build/cli/runtime
+          provider="$runtime/local-packages/registry/interface/world_provider_codex/packages/octopus-provider-codex"
+          life="$provider/life-bin/octopus-provider-opencodex-life"
+          test -f app/dist/index.html
+          test -x "$runtime/bin/octopus"
+          test -x "$runtime/bin/octopus-linux-process-authority"
+          test -x "$life"
+          readelf -l "$runtime/bin/octopus" | grep -q 'ld-musl-'
+          readelf -l "$runtime/bin/octopus-linux-process-authority" | grep -q 'ld-musl-'
+          cat "$runtime/runtime-build-receipt.json"
+          BUILD_SCRIPT
+          chmod 0755 "$RUNNER_TEMP/alpine-build.sh"
+
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/alpine-build.sh:/tmp/alpine-build.sh:ro" \
             -w /work \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
             -e CARGO_NET_GIT_FETCH_WITH_CLI=true \
             -e RUSTFLAGS="-C target-feature=-crt-static" \
             -e TARGET_TRIPLE="$TARGET_TRIPLE" \
@@ -65,43 +112,19 @@ jobs:
                 sqlite-dev \
                 alsa-lib-dev
 
-              git config --global --add safe.directory /work
+              if ! getent group "$HOST_GID" >/dev/null 2>&1; then
+                addgroup -g "$HOST_GID" builder
+              fi
+              builder_group=$(getent group "$HOST_GID" | cut -d: -f1)
+              if ! getent passwd "$HOST_UID" >/dev/null 2>&1; then
+                adduser -D -u "$HOST_UID" -G "$builder_group" -h /home/builder builder
+              fi
+              builder_user=$(getent passwd "$HOST_UID" | cut -d: -f1)
+              builder_home=$(getent passwd "$HOST_UID" | cut -d: -f6)
+              mkdir -p "$builder_home"
+              chown "$HOST_UID:$HOST_GID" "$builder_home"
 
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --default-host "$TARGET_TRIPLE"
-              export PATH="$HOME/.cargo/bin:$PATH"
-              rustc --version
-              cargo --version
-              node --version
-
-              fish -c "printf \"fish-c-ok\n\"" | grep -qx "fish-c-ok"
-              fish -lc "printf \"fish-lc-ok\n\"" | grep -qx "fish-lc-ok"
-              sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/install-linux.sh
-              sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/octopus-process-authority.openrc
-
-              node -e "const { detectLinuxLibc, hostTarget } = require(\"./app/scripts/cli-target.cjs\"); const libc = detectLinuxLibc(); const triple = hostTarget(); console.log({ libc, triple }); if (libc !== \"musl\" || triple !== process.env.TARGET_TRIPLE) process.exit(1);"
-
-              npm ci --prefix app
-              node --test app/scripts/test-cli-target.cjs app/scripts/test-indexed-ledger-projection.cjs
-
-              cargo test --locked \
-                -p octopus-linux-process-authority \
-                -p octopus-shell-command \
-                -p octopus-system-workspace-env \
-                -p octopus-applypatch
-
-              npm --prefix app run build:cli -- --target="$TARGET_TRIPLE"
-              npm --prefix app run build
-
-              runtime=app/build/cli/runtime
-              provider="$runtime/local-packages/registry/interface/world_provider_codex/packages/octopus-provider-codex"
-              life="$provider/life-bin/octopus-provider-opencodex-life"
-              test -f app/dist/index.html
-              test -x "$runtime/bin/octopus"
-              test -x "$runtime/bin/octopus-linux-process-authority"
-              test -x "$life"
-              readelf -l "$runtime/bin/octopus" | grep -q "ld-musl-"
-              readelf -l "$runtime/bin/octopus-linux-process-authority" | grep -q "ld-musl-"
-              cat "$runtime/runtime-build-receipt.json"
+              exec su -s /bin/sh "$builder_user" -c "export HOME=\"$builder_home\"; exec /tmp/alpine-build.sh"
             '
 
       - name: Summarize musl build outputs
