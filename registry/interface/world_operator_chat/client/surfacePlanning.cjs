@@ -10,7 +10,7 @@ const { validatePlannedHostBindings } = require("./hostBindings.cjs");
 const { readFileHashIfPresent, resolveRegistryRoot, waitForInterfaceSocket, withRunAuthoringLock } = require("./publication.cjs");
 const { readConfig, resolveEeInstancesRoot, resolveInstallationRoot, resolvePackageExecutable } = require("./roots.cjs");
 const { assertPublicationExpansion, interfaceEndpoint, operatorContextArtifactBindings, operatorDoorHostSlots, operatorExternalInputs, operatorExternalRelays, operatorModelOutputs, operatorPayloadArtifactBindings, operatorPublications, operatorSelectedTools, operatorSelectedWorkerEnvironmentKinds, operatorSurfaceRole, planOperatorChatTopology, plannedAdditionalRunWrites, plannedClientRemoval, plannedClientWrite, plannedExactIds, safeContractToken, safeSha256, validatePlannedRunRecord } = require("./topologyPlan.cjs");
-const { absolutePath, assertAdmitted, isObject, numberValue, optionalServiceTier, randomToken, readJsonDocumentIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
+const { absolutePath, assertAdmitted, hydrateInterfaceDescriptorFromRegistry, isObject, numberValue, optionalServiceTier, randomToken, readJsonDocumentIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
 
 async function submitOperatorTurnControl(options, request) {
   const config = await readConfig();
@@ -347,6 +347,7 @@ async function planOperatorChatTaskAmendment(options, request) {
   if (!providerDescriptor) {
     throw new Error(`operator chat provider '${providerInterfaceId}' has no exact descriptor`);
   }
+  await hydrateInterfaceDescriptorFromRegistry(providerDescriptor.value, registryRoot);
   const providerPrivateConfig = requiredObject(
     requiredObject(
       providerDescriptor.value.interface_driver_config,

@@ -77,6 +77,7 @@ async function generateTaskTitle(options, input) {
   if (await optional(sourcePath) === null) return null;
   const provider = segment(source.chat.provider_bound_interface_id);
   const selected = await json(path.join(registry, "interface", provider, "interface.json"));
+  await require("./client/values.cjs").hydrateInterfaceDescriptorFromRegistry(selected, registry);
   if (selected.id !== provider || selected.interface_driver_ref !== config.provider_driver
       || selected.interface_driver_config?.private_config?.opencodex) return null;
   const identity = identityFor(config, runId, provider, `ee_client_maintenance_${segment(source.chat.os_root_ee_id)}`);

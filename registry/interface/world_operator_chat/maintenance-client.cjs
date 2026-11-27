@@ -314,6 +314,8 @@ function narrow(binding, id, label) {
   }
 }
 
+const { hydrateCopiedInterfaceDescriptor } = require("./client/values.cjs");
+
 function descriptorReader(plan, root) {
   if (!path.isAbsolute(root) || path.normalize(root) !== root) fail("registry root must be an absolute normalized coordinate");
   const staged = new Map();
@@ -321,7 +323,7 @@ function descriptorReader(plan, root) {
     if (staged.has(write.path)) fail("planned descriptors repeat an exact path");
     staged.set(write.path, write.content);
   }
-  return (kind, id, name = `${kind}.json`) => {
+  const read = (kind, id, name = `${kind}.json`, depth = 0) => {
     const file = path.join(root, kind, component(id, "descriptor owner"), name);
     let content;
     if (staged.has(file)) content = staged.get(file);
@@ -346,8 +348,13 @@ function descriptorReader(plan, root) {
     if (typeof content !== "string" || Buffer.byteLength(content) > MAX_DESCRIPTOR_BYTES) fail("maintenance descriptor exceeds its byte bound");
     const value = object(JSON.parse(content), "descriptor");
     if (value.id !== id) fail("maintenance descriptor owner differs from its exact path");
+    if (kind === "interface" && name === "interface.json" && depth === 0 && typeof value.copy_of === "string" && value.copy_of) {
+      const base = read("interface", value.copy_of, "interface.json", depth + 1);
+      hydrateCopiedInterfaceDescriptor(value, base);
+    }
     return value;
   };
+  return read;
 }
 
 function object(value, name) {

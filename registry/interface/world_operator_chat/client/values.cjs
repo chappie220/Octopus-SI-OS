@@ -1,4 +1,4 @@
-module.exports = { absolutePath, arrayValue, artifactIdHasLabel, artifactLabel, assertAdmitted, boundedPositiveInteger, contentHashHex, databaseInteger, decimalSafeInteger, endpointId, endpointInterfaceId, exactArrivalRuntime, exactOutboundRuntime, integerAtLeast, invocationRuntime, isObject, nonNegativeInteger, numberValue, optionalServiceTier, positiveInteger, randomToken, readJsonDocumentIfPresent, readJsonIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, requiredTrimmedString, safeFilename, safeSegment, sha256Hex, streamFragmentValue, stringValue };
+module.exports = { absolutePath, arrayValue, artifactIdHasLabel, artifactLabel, assertAdmitted, boundedPositiveInteger, contentHashHex, databaseInteger, decimalSafeInteger, endpointId, endpointInterfaceId, exactArrivalRuntime, exactOutboundRuntime, hydrateCopiedInterfaceDescriptor, hydrateInterfaceDescriptorFromRegistry, integerAtLeast, invocationRuntime, isObject, nonNegativeInteger, numberValue, optionalServiceTier, positiveInteger, randomToken, readJsonDocumentIfPresent, readJsonIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, requiredTrimmedString, safeFilename, safeSegment, sha256Hex, streamFragmentValue, stringValue };
 
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -225,4 +225,63 @@ function optionalServiceTier(value) {
     throw new Error("serviceTier must be a non-empty native tier id");
   }
   return value;
+}
+
+const NON_INHERITED_PRIVATE_CONFIG_KEYS = new Set([
+  "reasoning_effort",
+  "service_tier",
+  "run_authoring",
+  "input_intake",
+  "context_artifact_bindings",
+  "model_tool_names",
+  "run_affordances",
+]);
+
+function hydrateCopiedInterfaceDescriptor(descriptor, base) {
+  if (!isObject(descriptor) || !isObject(base)) return descriptor;
+  if (stringValue(descriptor.copy_of) !== stringValue(base.id) || !stringValue(base.id)) return descriptor;
+  const baseCfg = base.interface_driver_config;
+  if (!isObject(baseCfg)) return descriptor;
+  const cfg = isObject(descriptor.interface_driver_config)
+    ? descriptor.interface_driver_config
+    : (descriptor.interface_driver_config = { private_config: {}, host_slots: {} });
+  if (cfg.residual_ambient == null && baseCfg.residual_ambient != null) {
+    cfg.residual_ambient = structuredClone(baseCfg.residual_ambient);
+  }
+  if (cfg.transport == null && baseCfg.transport != null) {
+    cfg.transport = structuredClone(baseCfg.transport);
+  }
+  if ((!Array.isArray(cfg.supported_reasoning_efforts) || cfg.supported_reasoning_efforts.length === 0)
+    && Array.isArray(baseCfg.supported_reasoning_efforts) && baseCfg.supported_reasoning_efforts.length > 0) {
+    cfg.supported_reasoning_efforts = structuredClone(baseCfg.supported_reasoning_efforts);
+  }
+  if (isObject(baseCfg.host_slots)) {
+    const hostSlots = isObject(cfg.host_slots) ? cfg.host_slots : (cfg.host_slots = {});
+    for (const [k, v] of Object.entries(baseCfg.host_slots)) {
+      if (!(k in hostSlots)) hostSlots[k] = structuredClone(v);
+    }
+  }
+  if (isObject(baseCfg.private_config)) {
+    const privateCfg = isObject(cfg.private_config) ? cfg.private_config : (cfg.private_config = {});
+    for (const [k, v] of Object.entries(baseCfg.private_config)) {
+      if (NON_INHERITED_PRIVATE_CONFIG_KEYS.has(k)) continue;
+      if (!(k in privateCfg)) privateCfg[k] = structuredClone(v);
+    }
+    const baseOutputSelection = baseCfg.private_config.run_affordance_profile?.output_selection;
+    const defaults = privateCfg.run_affordances?.defaults;
+    if (baseOutputSelection != null && isObject(defaults) && !("output_selection" in defaults)) {
+      defaults.output_selection = structuredClone(baseOutputSelection);
+    }
+  }
+  return descriptor;
+}
+
+async function hydrateInterfaceDescriptorFromRegistry(descriptor, registryRoot) {
+  const baseId = stringValue(descriptor?.copy_of);
+  if (!baseId || baseId === "." || baseId === ".." || /[/\\\0]/.test(baseId)) return descriptor;
+  const base = await readJsonIfPresent(path.join(registryRoot, "interface", baseId, "interface.json"));
+  if (isObject(base) && base.id === baseId) {
+    hydrateCopiedInterfaceDescriptor(descriptor, base);
+  }
+  return descriptor;
 }
