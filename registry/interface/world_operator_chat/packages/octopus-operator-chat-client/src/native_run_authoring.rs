@@ -107,12 +107,30 @@ pub(super) fn plan(
         "tools":tools,"door_host_slots":context.door_host_slots,"context_artifacts":[],
         "return_interface_ids":[],
     });
-    let Some((affordances, catalog)) = render(&profile, &catalog_id, json!({
+    let Some((mut affordances, catalog)) = render(&profile, &catalog_id, json!({
         "file_write_tool":writer,"file_read_tool":reader,"artifact_send_tool":sender,"roots":roots,"defaults":defaults,
     }), identity.owns_client().then_some(config.interface.as_str()))? else {
         writes[provider_index].content = pretty_json(&provider)?;
         return Ok(None);
     };
+    if provider.get("copy_of").and_then(Value::as_str) == Some(context.provider.interface.id.as_str()) {
+        if let Some(defaults_obj) = affordances
+            .get_mut("defaults")
+            .and_then(Value::as_object_mut)
+        {
+            if defaults_obj.get("output_selection")
+                == context
+                    .provider
+                    .interface
+                    .interface_driver_config
+                    .as_ref()
+                    .and_then(|cfg| cfg.private_config.get("run_affordance_profile"))
+                    .and_then(|p| p.get("output_selection"))
+            {
+                defaults_obj.remove("output_selection");
+            }
+        }
+    }
     private.insert("run_affordances".into(), affordances);
     writes[provider_index].content = pretty_json(&provider)?;
     push_json_write(context.registry_root.join("artifact").join(&catalog_id).join("artifact.json"),

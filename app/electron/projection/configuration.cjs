@@ -11,6 +11,66 @@ const { readEeInstanceRecords, readHostRootRefs, readRunRecords, validateEePolic
 const { normalizeRuntimeLaunchEnvironment } = require("./sidecars.cjs");
 const { arrayValue, stringValue } = require("./values.cjs");
 
+const NON_INHERITED_PRIVATE_CONFIG_KEYS = new Set([
+  "reasoning_effort",
+  "service_tier",
+  "run_authoring",
+  "input_intake",
+  "context_artifact_bindings",
+  "model_tool_names",
+  "run_affordances",
+]);
+
+function hydrateCopiedInterfaceDescriptors(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  const byId = new Map();
+  for (const row of rows) {
+    const id = stringValue(row?.id);
+    if (id) byId.set(id, row);
+  }
+  for (const row of rows) {
+    const baseId = stringValue(row?.copy_of);
+    if (!baseId) continue;
+    const base = byId.get(baseId);
+    const baseCfg = base?.interface_driver_config;
+    if (!baseCfg || typeof baseCfg !== "object") continue;
+    const cfg = row.interface_driver_config && typeof row.interface_driver_config === "object"
+      ? row.interface_driver_config
+      : (row.interface_driver_config = { private_config: {}, host_slots: {} });
+    if (cfg.residual_ambient == null && baseCfg.residual_ambient != null) {
+      cfg.residual_ambient = structuredClone(baseCfg.residual_ambient);
+    }
+    if (cfg.transport == null && baseCfg.transport != null) {
+      cfg.transport = structuredClone(baseCfg.transport);
+    }
+    if ((!Array.isArray(cfg.supported_reasoning_efforts) || cfg.supported_reasoning_efforts.length === 0)
+      && Array.isArray(baseCfg.supported_reasoning_efforts) && baseCfg.supported_reasoning_efforts.length > 0) {
+      cfg.supported_reasoning_efforts = structuredClone(baseCfg.supported_reasoning_efforts);
+    }
+    if (baseCfg.host_slots && typeof baseCfg.host_slots === "object") {
+      const hostSlots = cfg.host_slots && typeof cfg.host_slots === "object" ? cfg.host_slots : (cfg.host_slots = {});
+      for (const [k, v] of Object.entries(baseCfg.host_slots)) {
+        if (!(k in hostSlots)) hostSlots[k] = structuredClone(v);
+      }
+    }
+    const basePrivate = baseCfg.private_config;
+    if (basePrivate && typeof basePrivate === "object") {
+      const privateCfg = cfg.private_config && typeof cfg.private_config === "object"
+        ? cfg.private_config
+        : (cfg.private_config = {});
+      for (const [k, v] of Object.entries(basePrivate)) {
+        if (NON_INHERITED_PRIVATE_CONFIG_KEYS.has(k)) continue;
+        if (!(k in privateCfg)) privateCfg[k] = structuredClone(v);
+      }
+      const baseOutputSelection = basePrivate.run_affordance_profile?.output_selection;
+      const defaults = privateCfg.run_affordances?.defaults;
+      if (baseOutputSelection != null && defaults && typeof defaults === "object" && !("output_selection" in defaults)) {
+        defaults.output_selection = structuredClone(baseOutputSelection);
+      }
+    }
+  }
+}
+
 function configurationProjection(store) {
   let configurationProjectionGeneration = 1;
   let configurationProjectionBuild = null;
@@ -197,6 +257,7 @@ function configurationProjection(store) {
     ]);
     if (descriptorRead.status === "rejected") throw descriptorRead.reason;
     const descriptors = Object.fromEntries(descriptorRead.value);
+    hydrateCopiedInterfaceDescriptors(descriptors.interface);
     warnings.push(...descriptorWarnings);
     const packageWarningOffset = warnings.length;
     let clientAgentCatalog = null;

@@ -58,7 +58,7 @@ pub const RETIRED_INTERFACE_REQUEST_WORKER_METADATA_FIELD: &str = "worker_metada
 pub struct InterfaceDriverConfig {
     #[serde(default)]
     pub private_config: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residual_ambient: Option<serde_json::Value>,
     /// notes2 2026-07-06 / 2026-07-11 — per-instance root coordinates for this
     /// interface folder: named host root-slot ⇒ absolute path, overriding the
@@ -67,9 +67,9 @@ pub struct InterfaceDriverConfig {
     /// `residual_ambient` blob by a string pointer path.
     #[serde(default)]
     pub host_slots: BTreeMap<String, HostSlotOverride>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<InterfaceTransportConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_reasoning_efforts: Vec<String>,
 }
 
@@ -88,23 +88,23 @@ pub struct HostSlotOverride {
 #[serde(deny_unknown_fields)]
 pub struct InterfaceTransportConfig {
     pub base_url: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url_env: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_env_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_secret_ref: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_header: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_value_prefix: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_response_bytes: Option<u64>,
 }
 
@@ -181,6 +181,107 @@ impl InterfaceDescriptor {
             .iter()
             .map(|source| format!("{}.{}", self.type_label(), source))
             .collect()
+    }
+
+    const NON_INHERITED_PRIVATE_CONFIG_KEYS: &'static [&'static str] = &[
+        "reasoning_effort",
+        "service_tier",
+        "run_authoring",
+        "input_intake",
+        "context_artifact_bindings",
+        "model_tool_names",
+        "run_affordances",
+    ];
+
+    /// Strips static `interface_driver_config` fields that are semantically identical to
+    /// `base` when `self.copy_of == Some(base.id)`, keeping per-run descriptors compact.
+    pub fn strip_inherited_driver_config(&mut self, base: &InterfaceDescriptor) {
+        if self.copy_of.as_ref() != Some(&base.id) {
+            return;
+        }
+        let (Some(cfg), Some(base_cfg)) = (
+            self.interface_driver_config.as_mut(),
+            base.interface_driver_config.as_ref(),
+        ) else {
+            return;
+        };
+        cfg.private_config.retain(|key, value| {
+            if Self::NON_INHERITED_PRIVATE_CONFIG_KEYS.contains(&key.as_str()) {
+                return true;
+            }
+            base_cfg.private_config.get(key) != Some(value)
+        });
+        if let Some(base_output_selection) = base_cfg
+            .private_config
+            .get("run_affordance_profile")
+            .and_then(|profile| profile.get("output_selection"))
+        {
+            if let Some(defaults) = cfg
+                .private_config
+                .get_mut("run_affordances")
+                .and_then(|affordances| affordances.get_mut("defaults"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if defaults.get("output_selection") == Some(base_output_selection) {
+                    defaults.remove("output_selection");
+                }
+            }
+        }
+        if cfg.residual_ambient == base_cfg.residual_ambient {
+            cfg.residual_ambient = None;
+        }
+        if cfg.transport == base_cfg.transport {
+            cfg.transport = None;
+        }
+        if cfg.supported_reasoning_efforts == base_cfg.supported_reasoning_efforts {
+            cfg.supported_reasoning_efforts.clear();
+        }
+    }
+
+    /// Rehydrates static `interface_driver_config` fields omitted from a slimmed `copy_of`
+    /// descriptor using its `base` template descriptor.
+    pub fn inherit_driver_config_from(&mut self, base: &InterfaceDescriptor) {
+        if self.copy_of.as_ref() != Some(&base.id) {
+            return;
+        }
+        let Some(base_cfg) = base.interface_driver_config.as_ref() else {
+            return;
+        };
+        let cfg = self.interface_driver_config.get_or_insert_with(Default::default);
+        for (key, value) in &base_cfg.private_config {
+            if Self::NON_INHERITED_PRIVATE_CONFIG_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            cfg.private_config
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        if cfg.residual_ambient.is_none() {
+            cfg.residual_ambient = base_cfg.residual_ambient.clone();
+        }
+        if cfg.transport.is_none() {
+            cfg.transport = base_cfg.transport.clone();
+        }
+        if cfg.supported_reasoning_efforts.is_empty() {
+            cfg.supported_reasoning_efforts = base_cfg.supported_reasoning_efforts.clone();
+        }
+        if let Some(base_output_selection) = cfg
+            .private_config
+            .get("run_affordance_profile")
+            .and_then(|profile| profile.get("output_selection"))
+            .cloned()
+        {
+            if let Some(defaults) = cfg
+                .private_config
+                .get_mut("run_affordances")
+                .and_then(|affordances| affordances.get_mut("defaults"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                defaults
+                    .entry("output_selection".to_string())
+                    .or_insert(base_output_selection);
+            }
+        }
     }
 
     fn validate_source_names(&self) -> Result<(), String> {
@@ -1863,6 +1964,80 @@ mod tests {
         assert!(
             err.to_string().contains("repeats the interface_type axis"),
             "error should explain the source-only contract, got: {err}"
+        );
+    }
+
+    #[test]
+    fn strip_and_inherit_driver_config_round_trips_compact_copy() {
+        let base: InterfaceDescriptor = parse_strict(
+            br#"{
+                "id": "world_provider_openrouter",
+                "interface_type": "world",
+                "role": "provider",
+                "direction": "bidirectional",
+                "source_names": ["provider.openrouter"],
+                "interface_driver_ref": "codex",
+                "interface_driver_config": {
+                    "private_config": {
+                        "model": "default-model",
+                        "reasoning_effort": "high",
+                        "available_models": ["a", "b", "c"],
+                        "run_affordance_profile": {
+                            "output_selection": {"kind": "exact", "label": "reply"}
+                        }
+                    },
+                    "residual_ambient": {"auth": "env"},
+                    "host_slots": {},
+                    "transport": {"base_url": "https://openrouter.ai/api/v1"},
+                    "supported_reasoning_efforts": ["low", "medium", "high"]
+                }
+            }"#,
+        )
+        .expect("base descriptor parses");
+
+        let mut copy = base.clone();
+        copy.id = InterfaceId::new("world_provider_openrouter_run_1");
+        copy.copy_of = Some(base.id.clone());
+        let copy_private = &mut copy.interface_driver_config.as_mut().unwrap().private_config;
+        copy_private.insert("model".into(), serde_json::json!("custom-model"));
+        copy_private.remove("reasoning_effort");
+        copy_private.insert(
+            "run_affordances".into(),
+            serde_json::json!({
+                "defaults": {
+                    "output_selection": {"kind": "exact", "label": "reply"}
+                }
+            }),
+        );
+
+        copy.strip_inherited_driver_config(&base);
+        let stripped_cfg = copy.interface_driver_config.as_ref().unwrap();
+        assert!(stripped_cfg.residual_ambient.is_none());
+        assert!(stripped_cfg.transport.is_none());
+        assert!(stripped_cfg.supported_reasoning_efforts.is_empty());
+        assert!(!stripped_cfg.private_config.contains_key("available_models"));
+        assert!(!stripped_cfg.private_config.contains_key("run_affordance_profile"));
+        assert_eq!(stripped_cfg.private_config["model"], "custom-model");
+        assert!(
+            stripped_cfg.private_config["run_affordances"]["defaults"]
+                .get("output_selection")
+                .is_none()
+        );
+
+        copy.inherit_driver_config_from(&base);
+        let hydrated = copy.interface_driver_config.as_ref().unwrap();
+        assert_eq!(hydrated.residual_ambient, base.interface_driver_config.as_ref().unwrap().residual_ambient);
+        assert_eq!(hydrated.transport, base.interface_driver_config.as_ref().unwrap().transport);
+        assert_eq!(
+            hydrated.supported_reasoning_efforts,
+            base.interface_driver_config.as_ref().unwrap().supported_reasoning_efforts
+        );
+        assert_eq!(hydrated.private_config["available_models"], serde_json::json!(["a", "b", "c"]));
+        assert_eq!(hydrated.private_config["model"], "custom-model");
+        assert!(!hydrated.private_config.contains_key("reasoning_effort"));
+        assert_eq!(
+            hydrated.private_config["run_affordances"]["defaults"]["output_selection"],
+            serde_json::json!({"kind": "exact", "label": "reply"})
         );
     }
 }

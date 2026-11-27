@@ -991,7 +991,7 @@ fn resolve_interface_descriptor_files(
             descriptor_path.display()
         )
     })?;
-    let descriptor: octopus_interfaces::InterfaceDescriptor =
+    let mut descriptor: octopus_interfaces::InterfaceDescriptor =
         octopus_descriptors::parse_strict(descriptor_bytes).map_err(|error| {
             format!(
                 "interface descriptor '{}' is malformed: {error}",
@@ -1005,6 +1005,25 @@ fn resolve_interface_descriptor_files(
             descriptor.id,
             interface
         ));
+    }
+    let mut own_files = own_files;
+    if let Some(base_id) = descriptor.copy_of.clone() {
+        let base_path = registry_root
+            .join("interface")
+            .join(base_id.as_str())
+            .join("interface.json");
+        if let Ok(base_bytes) = std::fs::read(&base_path) {
+            if let Ok(base_descriptor) =
+                octopus_descriptors::parse_strict::<octopus_interfaces::InterfaceDescriptor>(
+                    &base_bytes,
+                )
+            {
+                if base_descriptor.id == base_id {
+                    descriptor.inherit_driver_config_from(&base_descriptor);
+                    own_files.insert("copy_of_base_interface.json".to_string(), base_bytes);
+                }
+            }
+        }
     }
     Ok(Some(ResolvedInterfaceDescriptorFiles {
         interface_dir,
@@ -1179,6 +1198,20 @@ pub(crate) fn resolved_spawn_life_source_fingerprint(
         &registry_root.join("interface").join(interface.as_str()),
         None,
     )?;
+    if let Some(base_id) = resolved.interface_descriptor.copy_of.as_ref() {
+        let base_path = registry_root
+            .join("interface")
+            .join(base_id.as_str())
+            .join("interface.json");
+        if std::fs::symlink_metadata(&base_path).is_ok() {
+            append_path_metadata_fingerprint(
+                &mut material,
+                "copy-of-base-interface",
+                &base_path,
+                false,
+            )?;
+        }
+    }
     let repository_root = registry_root.parent().ok_or_else(|| {
         format!(
             "registry root '{}' has no repository parent",

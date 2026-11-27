@@ -142,8 +142,10 @@ pub(crate) fn plan_provider_interface(
         &identity.model_interface_id,
         interface_private_state_root,
     )?;
-    let descriptor = sibling_descriptor_bytes(
+    let disk_base = load_interface_descriptor(interface_root, provider.interface.id.as_str())?;
+    let descriptor = sibling_descriptor_bytes_against_base(
         &provider_interface,
+        &disk_base,
         &identity.model_interface_id,
         None,
         Some(&driver_config),
