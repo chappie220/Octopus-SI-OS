@@ -5,10 +5,16 @@ import type {
   OctopusProcessViewerState,
 } from "../../electron";
 
+import { backoffDelayMs } from "../../resilientTransport";
+
 export type WebSocketTerminalState = {
   detail: string;
   state: "connecting" | "connected" | "disconnected" | "failed";
 };
+
+const WS_CONNECT_TIMEOUT_MS = 12_000;
+const WS_RECONNECT_INITIAL_MS = 1_000;
+const WS_RECONNECT_MAX_MS = 15_000;
 
 export function createWebSocketTerminalSession(
   socketUrl: string,
@@ -17,17 +23,128 @@ export function createWebSocketTerminalSession(
   let socket: WebSocket | null = null;
   let handlers: OctopusTerminalSessionHandlers | null = null;
   let disposed = false;
-  let opened = false;
-  let failed = false;
+  let openedOnce = false;
+  let reconnectAttempt = 0;
+  let reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  let connectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 
   const update = (state: WebSocketTerminalState) => {
     if (!disposed) onState(state);
   };
 
-  const fail = (detail: string) => {
-    failed = true;
-    update({ detail, state: "failed" });
+  const clearTimers = () => {
+    if (reconnectTimer !== null) {
+      globalThis.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (connectTimer !== null) {
+      globalThis.clearTimeout(connectTimer);
+      connectTimer = null;
+    }
   };
+
+  const scheduleReconnect = (immediate = false) => {
+    if (disposed || !openedOnce) return;
+    clearTimers();
+    reconnectAttempt += 1;
+    const delayMs = immediate ? 0 : backoffDelayMs(reconnectAttempt, WS_RECONNECT_INITIAL_MS, WS_RECONNECT_MAX_MS);
+    update({
+      detail: `Reconnecting terminal (attempt ${reconnectAttempt})…`,
+      state: "connecting",
+    });
+    reconnectTimer = globalThis.setTimeout(() => {
+      reconnectTimer = null;
+      connectSocket();
+    }, delayMs);
+  };
+
+  const onOnline = () => {
+    if (disposed || !openedOnce) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      reconnectAttempt = 0;
+      scheduleReconnect(true);
+    }
+  };
+
+  const connectSocket = (onInitialSettle?: { resolve: () => void; reject: (error: Error) => void }) => {
+    if (disposed) return;
+    clearTimers();
+    let settled = false;
+    let next: WebSocket;
+    try {
+      next = new WebSocket(socketUrl);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (openedOnce) {
+        scheduleReconnect();
+      } else {
+        update({ detail, state: "failed" });
+        onInitialSettle?.reject(error instanceof Error ? error : new Error(detail));
+      }
+      return;
+    }
+    socket = next;
+    next.binaryType = "arraybuffer";
+
+    connectTimer = globalThis.setTimeout(() => {
+      connectTimer = null;
+      if (disposed || socket !== next || next.readyState === WebSocket.OPEN) return;
+      try { next.close(); } catch {}
+    }, WS_CONNECT_TIMEOUT_MS);
+
+    next.addEventListener("open", () => {
+      if (disposed || socket !== next) return;
+      if (connectTimer !== null) {
+        globalThis.clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+      openedOnce = true;
+      reconnectAttempt = 0;
+      update({ detail: "Terminal connected", state: "connected" });
+      if (!settled) {
+        settled = true;
+        onInitialSettle?.resolve();
+      }
+    });
+
+    next.addEventListener("message", (event) => {
+      if (disposed || socket !== next) return;
+      if (typeof event.data === "string") handlers?.onData(event.data);
+      else if (event.data instanceof ArrayBuffer) handlers?.onData(new TextDecoder().decode(event.data));
+    });
+
+    next.addEventListener("error", () => {
+      if (disposed || socket !== next) return;
+      try { next.close(); } catch {}
+    });
+
+    next.addEventListener("close", (event) => {
+      if (disposed || socket !== next) return;
+      if (connectTimer !== null) {
+        globalThis.clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+      socket = null;
+      if (event.code === 1000) {
+        update({ detail: event.reason || "The terminal socket closed.", state: "disconnected" });
+        return;
+      }
+      if (openedOnce) {
+        scheduleReconnect();
+        return;
+      }
+      const detail = "The projected terminal socket could not be reached.";
+      update({ detail, state: "failed" });
+      if (!settled) {
+        settled = true;
+        onInitialSettle?.reject(new Error(detail));
+      }
+    });
+  };
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("online", onOnline);
+  }
 
   return {
     open() {
@@ -35,46 +152,7 @@ export function createWebSocketTerminalSession(
       if (socket) return Promise.reject(new Error("The terminal session is already open."));
       update({ detail: "Opening the projected terminal socket…", state: "connecting" });
       return new Promise<void>((resolve, reject) => {
-        let settled = false;
-        try {
-          socket = new WebSocket(socketUrl);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          fail(detail);
-          reject(error);
-          return;
-        }
-        socket.binaryType = "arraybuffer";
-        socket.addEventListener("open", () => {
-          opened = true;
-          settled = true;
-          update({ detail: "Terminal connected", state: "connected" });
-          resolve();
-        });
-        socket.addEventListener("message", (event) => {
-          if (typeof event.data === "string") handlers?.onData(event.data);
-          else if (event.data instanceof ArrayBuffer) handlers?.onData(new TextDecoder().decode(event.data));
-        });
-        socket.addEventListener("error", () => {
-          const detail = "The projected terminal socket could not be reached.";
-          fail(detail);
-          try { socket?.close(); } catch {}
-          if (!settled) {
-            settled = true;
-            reject(new Error(detail));
-          }
-        });
-        socket.addEventListener("close", (event) => {
-          if (disposed || failed) return;
-          const detail = opened
-            ? event.reason || `The terminal socket closed${event.code ? ` (code ${event.code})` : ""}.`
-            : "The projected terminal socket closed before it connected.";
-          update({ detail, state: "disconnected" });
-          if (!settled) {
-            settled = true;
-            reject(new Error(detail));
-          }
-        });
+        connectSocket({ resolve, reject });
       });
     },
     write(data) {
@@ -86,6 +164,10 @@ export function createWebSocketTerminalSession(
       return () => {
         if (handlers === next) handlers = null;
         disposed = true;
+        clearTimers();
+        if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+          window.removeEventListener("online", onOnline);
+        }
         if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "surface closed");
         socket = null;
       };

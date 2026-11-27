@@ -1,0 +1,384 @@
+/* Minimal pre-login stylesheet for fast first paint on weak networks.
+ * Full workspace, design-system, Tailwind, KaTeX, and xterm styles load lazily
+ * in FullAppEntry once authentication succeeds (or immediately in desktop mode).
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+  color: var(--text, #ececec);
+  background: var(--bg, #181818);
+  -webkit-font-smoothing: antialiased;
+}
+
+.welcome {
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg, #181818);
+  color: var(--text, #ececec);
+}
+
+.welcome-top {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  -webkit-app-region: no-drag;
+}
+
+.welcome-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.welcome-brand-mark {
+  width: 19px;
+  height: 19px;
+  opacity: 0.9;
+}
+
+[data-theme="light"] .welcome-brand-mark {
+  filter: invert(1);
+}
+
+.welcome-brand-name {
+  font-size: var(--ui-font-13, 13px);
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  color: var(--text-soft, rgb(255 255 255 / 72%));
+}
+
+.welcome-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 6px 32px 52px;
+}
+
+.welcome-agent .welcome-stage {
+  overflow-y: auto;
+  align-items: safe center;
+}
+
+.welcome-access-state {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  color: var(--copy, rgb(255 255 255 / 68%));
+  font-size: var(--ui-font-13, 13px);
+  text-align: center;
+}
+
+.welcome-access-state strong {
+  color: var(--text, #ececec);
+  font-size: var(--ui-font-14_5, 14.5px);
+  font-weight: 500;
+}
+
+.welcome-access-state span {
+  max-width: 420px;
+  text-wrap: balance;
+}
+
+.welcome-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.welcome-access-state button {
+  height: 30px;
+  margin-top: 6px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--button-secondary, rgb(255 255 255 / 12%));
+  color: var(--text, #ececec);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--ui-font-12, 12px);
+}
+
+.welcome-access-state button:hover {
+  background: var(--button-secondary-hover, rgb(255 255 255 / 18%));
+}
+
+.welcome-title {
+  margin: 0;
+  color: var(--text, #ececec);
+  font-size: clamp(27px, 3vw, 35px);
+  line-height: 1.1;
+  font-weight: 500;
+  letter-spacing: -0.014em;
+}
+
+.welcome-body {
+  max-width: 460px;
+  margin: 15px 0 0;
+  color: var(--copy, rgb(255 255 255 / 68%));
+  font-size: var(--ui-font-14_5, 14.5px);
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+.welcome-lock-form {
+  text-align: left;
+  max-width: 420px;
+}
+
+.welcome-agent .welcome-agent-form {
+  width: min(100%, 380px);
+  display: grid;
+  gap: 16px;
+  padding-block: 16px;
+  text-align: left;
+}
+
+.welcome-agent-form label {
+  display: grid;
+  gap: 6px;
+  font-size: var(--ui-font-14, 14px);
+}
+
+.welcome-lock-row {
+  -webkit-app-region: no-drag;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 52px;
+  padding: 0 10px 0 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-token-foreground, #ffffff) 5%, transparent);
+  transition: background 140ms ease;
+}
+
+.welcome-lock-row:focus-within {
+  background: color-mix(in srgb, var(--color-token-foreground, #ffffff) 7.5%, transparent);
+}
+
+.welcome-lock-input {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text, #ececec);
+  font-family: var(--font-ui, inherit);
+  font-size: var(--ui-font-15, 15px);
+  font-weight: 400;
+  outline: none;
+}
+
+.welcome-lock-primary {
+  -webkit-app-region: no-drag;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--color-token-foreground, #ffffff);
+  color: var(--color-token-main-surface-primary, #181818);
+  font: inherit;
+  font-size: var(--ui-font-14, 14px);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 140ms ease, opacity 140ms ease;
+}
+
+.welcome-lock-primary:hover {
+  background: color-mix(in srgb, var(--color-token-foreground, #ffffff) 80%, transparent);
+}
+
+.welcome-lock-primary:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.welcome-lock-error {
+  margin: 10px 0 0;
+  font-size: var(--ui-font-12_5, 12.5px);
+  color: var(--danger, #ff6764);
+}
+
+.welcome-lock-forgot {
+  -webkit-app-region: no-drag;
+  display: inline-block;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim, rgb(255 255 255 / 56%));
+  font: inherit;
+  font-size: var(--ui-font-13, 13px);
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.welcome-lock-forgot:hover {
+  color: var(--text-soft, rgb(255 255 255 / 78%));
+}
+
+.app-loading-state {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--color-token-main-surface-primary, var(--bg, #181818));
+  -webkit-app-region: drag;
+}
+
+.octopus-loading-state-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px;
+  text-align: center;
+}
+
+.octopus-loading-detail {
+  max-width: 360px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--copy, rgb(255 255 255 / 68%));
+}
+
+.octopus-loading-action {
+  margin-top: 4px;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--button-secondary, rgb(255 255 255 / 14%));
+  color: var(--text, #ececec);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.octopus-loading-action:hover {
+  background: var(--button-secondary-hover, rgb(255 255 255 / 22%));
+}
+
+.octopus-loading-logo {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  --octopus-loading-logo-highlight: var(--color-token-foreground, #ffffff);
+  --octopus-loading-logo-soft: color-mix(in srgb, var(--octopus-loading-logo-highlight) 4%, transparent);
+  --octopus-loading-logo-peak: color-mix(in srgb, var(--octopus-loading-logo-highlight) 48%, transparent);
+  --octopus-loading-logo-tail: color-mix(in srgb, var(--octopus-loading-logo-highlight) 8%, transparent);
+  opacity: 0;
+  animation: octopus-loading-logo-fade-in 180ms ease-out 60ms forwards;
+}
+
+[data-theme="light"] .octopus-loading-logo {
+  --octopus-loading-logo-highlight: var(--color-token-main-surface-primary, #fff);
+}
+
+.octopus-loading-logo-base {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.68;
+}
+
+[data-theme="light"] .octopus-loading-logo-base {
+  filter: brightness(0);
+  opacity: 0.24;
+}
+
+.octopus-loading-logo-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+    112deg,
+    transparent 22%,
+    var(--octopus-loading-logo-soft) 38%,
+    var(--octopus-loading-logo-peak) 49%,
+    var(--octopus-loading-logo-tail) 56%,
+    transparent 74%
+  );
+  background-position: 140% 0;
+  background-repeat: no-repeat;
+  background-size: 220% 100%;
+  animation: octopus-loading-logo-shimmer 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes octopus-loading-logo-shimmer {
+  from {
+    background-position: 140% 0;
+  }
+  to {
+    background-position: -105% 0;
+  }
+}
+
+@keyframes octopus-loading-logo-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .octopus-loading-logo {
+    animation: none;
+    opacity: 1;
+  }
+  .octopus-loading-logo-overlay {
+    animation: none;
+  }
+}
+
+.renderer-failure-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg, #181818);
+  color: var(--text, #ececec);
+}
+
+.renderer-failure-card {
+  display: flex;
+  width: 100%;
+  max-width: 448px;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}

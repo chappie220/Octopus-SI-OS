@@ -1,4 +1,11 @@
 import { isWebClient, isAgentWebClient } from "./webClient";
+import { notifyClientAccessUnauthorized } from "./clientAccess";
+import {
+  extractErrorMessage,
+  fetchWithRetry,
+  fetchWithTimeout,
+  readJsonValueSafely,
+} from "./resilientTransport";
 // The client reads the projection — there is no "bridge" concept in the architecture.
 // Two equal readers of the same engine (electron/projection.cjs):
 //   - the desktop app serves it over IPC (window.octopusTransport),
@@ -87,14 +94,21 @@ export async function readProjection<T = unknown, M extends ProjectionReadMethod
     return bridge.projectionRead(request) as Promise<T>;
   }
   if (isWebClient()) {
-    const response = await fetch(WEB_PROJECTION_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
-    const payload = await response.json();
+    const response = await fetchWithRetry(
+      WEB_PROJECTION_URL,
+      {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      },
+      { timeoutMs: 15_000, maxAttempts: 3, initialDelayMs: 600, maxDelayMs: 4_000 },
+    );
+    if (response.status === 401) notifyClientAccessUnauthorized();
+    const payload = await readJsonValueSafely(response);
     if (!response.ok) {
-      throw new Error(typeof payload?.error === "string" ? payload.error : `projection read failed: ${response.status}`);
+      throw new Error(extractErrorMessage(payload) ?? `projection read failed: ${response.status}`);
     }
     return payload as T;
   }
@@ -157,13 +171,16 @@ export async function mutateOctopusOsWorkspace(request: OctopusOsWorkspaceMutati
   const host = window.octopusTransport;
   if (host?.mutateOctopusOsWorkspace) return host.mutateOctopusOsWorkspace(request);
   if (!isAgentWebClient()) throw new Error("Workspace editing requires a live desktop client or Agent server.");
-  const response = await fetch("/__octopus/workspace", {
+  const response = await fetchWithTimeout("/__octopus/workspace", {
     method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(request),
-  });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload?.error || `Workspace update failed: HTTP ${response.status}`);
+  }, 20_000);
+  if (response.status === 401) notifyClientAccessUnauthorized();
+  const payload = await readJsonValueSafely(response);
+  if (!response.ok) throw new Error(extractErrorMessage(payload) ?? `Workspace update failed: HTTP ${response.status}`);
   return payload as OctopusOsWorkspaceMutationOutcome;
 }
 

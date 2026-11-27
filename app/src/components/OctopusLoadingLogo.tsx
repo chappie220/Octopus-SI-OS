@@ -39,9 +39,15 @@ export function OctopusLoadingLogo({ size = 56 }: { size?: number }) {
 export function OctopusLoadingState({
   className = "",
   label,
+  detail,
+  actionLabel,
+  onAction,
 }: {
   className?: string;
   label: string;
+  detail?: string;
+  actionLabel?: string;
+  onAction?: () => void;
 }) {
   return (
     <div
@@ -50,7 +56,19 @@ export function OctopusLoadingState({
       className={className || undefined}
       role="status"
     >
-      <OctopusLoadingLogo />
+      <div className="octopus-loading-state-inner">
+        <OctopusLoadingLogo />
+        {detail && <span className="octopus-loading-detail">{detail}</span>}
+        {actionLabel && onAction && (
+          <button
+            className="octopus-loading-action"
+            onClick={onAction}
+            type="button"
+          >
+            {actionLabel}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
