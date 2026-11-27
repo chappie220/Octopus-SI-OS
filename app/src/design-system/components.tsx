@@ -652,7 +652,7 @@ export function OcCheckbox({
       />
       <span
         aria-hidden="true"
-        className={cx("oc-checkbox__control shrink-0", description && "mt-0.5")}
+        className={cx("oc-checkbox__control shrink-0", Boolean(description) && "mt-0.5")}
       >
         {checked === "mixed" ? <svg width="14" height="14" viewBox="0 0 20 20" fill="none" focusable="false"><path d="M3.5 10.0002C3.5 9.63297 3.79777 9.33521 4.16504 9.33521H15.835C16.2022 9.33521 16.5 9.63297 16.5 10.0002C16.5 10.3675 16.2022 10.6652 15.835 10.6652H4.16504C3.79777 10.6652 3.5 10.3675 3.5 10.0002Z" fill="currentColor" /></svg> : checked ? <Glyph name="check" size={12} /> : null}
       </span>
