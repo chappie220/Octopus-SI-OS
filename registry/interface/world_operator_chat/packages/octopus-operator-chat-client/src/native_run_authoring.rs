@@ -58,6 +58,7 @@ pub(super) fn plan(
         provider_tag,
     )?;
     let mut provider: Value = serde_json::from_str(&writes[provider_index].content).map_err(|error| error.to_string())?;
+    let is_copy_of_base = provider.get("copy_of").and_then(Value::as_str) == Some(context.provider.interface.id.as_str());
     let private = provider.pointer_mut("/interface_driver_config/private_config")
         .and_then(Value::as_object_mut).ok_or("planned provider private_config must be an object")?;
     private.remove("run_affordances");
@@ -113,7 +114,7 @@ pub(super) fn plan(
         writes[provider_index].content = pretty_json(&provider)?;
         return Ok(None);
     };
-    if provider.get("copy_of").and_then(Value::as_str) == Some(context.provider.interface.id.as_str()) {
+    if is_copy_of_base {
         if let Some(defaults_obj) = affordances
             .get_mut("defaults")
             .and_then(Value::as_object_mut)
