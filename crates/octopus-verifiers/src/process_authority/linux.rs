@@ -485,17 +485,16 @@ impl LinuxProcessPolicy {
                     "rk"
                 }
             };
-            if coalesce_publication
-                && matches!(rule.access, FileAccess::Read | FileAccess::Write)
-                && let Some((directory, suffix)) = publication_coalesce_key(&rule.selector)?
-            {
-                // Preserve full selector validation even when coalescing the compiled DFA pattern.
-                let _ = rule.selector.patterns()?;
-                coalesced_publication
-                    .entry((directory, rule.access))
-                    .or_default()
-                    .insert(suffix);
-                continue;
+            if coalesce_publication && matches!(rule.access, FileAccess::Read | FileAccess::Write) {
+                if let Some((directory, suffix)) = publication_coalesce_key(&rule.selector)? {
+                    // Preserve full selector validation even when coalescing the compiled DFA pattern.
+                    let _ = rule.selector.patterns()?;
+                    coalesced_publication
+                        .entry((directory, rule.access))
+                        .or_default()
+                        .insert(suffix);
+                    continue;
+                }
             }
             for pattern in rule.selector.patterns()? {
                 lines.insert(format!("  \"{pattern}\" {permissions},\n"));
