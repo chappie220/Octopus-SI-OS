@@ -781,6 +781,7 @@ export function ChatMessageList({
         onTouchCancel={() => { touchStartRef.current = null; }}
         onTouchEnd={() => { touchStartRef.current = null; }}
         onTouchMove={(event) => {
+          if (event.target instanceof Element && event.target.closest("[data-thread-scroll-footer]")) return;
           const start = touchStartRef.current;
           const touch = event.touches.length === 1 ? event.touches[0] : null;
           if (!start || !touch || touch.identifier !== start.identifier) {
@@ -794,6 +795,7 @@ export function ChatMessageList({
           if (Math.abs(deltaY) > Math.abs(deltaX)) stopProgrammaticLatestScroll(deltaY > 0);
         }}
         onTouchStart={(event) => {
+          if (event.target instanceof Element && event.target.closest("[data-thread-scroll-footer]")) return;
           stopProgrammaticLatestScroll();
           const touch = event.touches.length === 1 ? event.touches[0] : null;
           touchStartRef.current = touch

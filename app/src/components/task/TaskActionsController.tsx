@@ -111,7 +111,11 @@ export function TaskActionsController({
       if (projectWorkspace.pending) return;
       close();
       const generation = latest.current.generation;
-      void projectWorkspace.setTaskArchived(runId, value).catch((failure) => {
+      void projectWorkspace.setTaskArchived(runId, value).then(() => {
+        if (latest.current.scope === scope && latest.current.generation === generation) {
+          appToast.success(value ? "Task archived" : "Task restored");
+        }
+      }, (failure) => {
         if (latest.current.scope === scope && latest.current.generation === generation) error(failure);
       });
     };
@@ -202,6 +206,7 @@ export function TaskActionsController({
       onChatOrderIdsChange(chatOrderIds.filter((id) => id !== runId));
       if (activeChatRunId === runId && homeRunId) onSelectChat(homeRunId);
       setDeletingTask(null);
+      appToast.success("Task deleted");
     } catch (failure) { if (latest.current.scope === scope && latest.current.generation === generation) error(failure); }
   };
   const menuRun = currentRun(menu);

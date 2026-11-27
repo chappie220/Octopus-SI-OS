@@ -177,7 +177,7 @@ export async function mutateOctopusOsWorkspace(request: OctopusOsWorkspaceMutati
     cache: "no-store",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(request),
-  }, 20_000);
+  }, 90_000);
   if (response.status === 401) notifyClientAccessUnauthorized();
   const payload = await readJsonValueSafely(response);
   if (!response.ok) throw new Error(extractErrorMessage(payload) ?? `Workspace update failed: HTTP ${response.status}`);

@@ -681,7 +681,16 @@ async function octopusOsOwnedToolTopology(registryRoot, exactInterfaces, compani
     if (entry.name === ".octopus-publication") { await requirePrivatePublicationDirectory(path.join(toolRoot, entry.name)); continue; }
     if (!entry.isDirectory() || !safeInterfacePathSegment(entry.name)) continue;
     const directory = path.join(toolRoot, entry.name);
-    const descriptor = await readRegularJsonDocument(path.join(directory, "tool.json"), `tool descriptor ${entry.name}`);
+    const descriptor = await readOptionalRegularJsonDocument(path.join(directory, "tool.json"), `tool descriptor ${entry.name}`);
+    if (!descriptor) {
+      const children = await fs.readdir(directory, { withFileTypes: true });
+      const onlyPublication = children.every((child) => child.name === ".octopus-publication");
+      if (onlyPublication) {
+        if (children.length > 0) await requirePrivatePublicationDirectory(path.join(directory, ".octopus-publication"));
+        continue;
+      }
+      throw new Error(`tool descriptor '${entry.name}' is missing tool.json`);
+    }
     if (stringValue(descriptor.document?.id) !== entry.name) {
       throw new Error(`tool descriptor '${entry.name}' has drifted identity`);
     }

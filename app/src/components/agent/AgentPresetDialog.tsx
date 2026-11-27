@@ -209,10 +209,10 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
       initialFocusRef={readOnly ? undefined : inputRef}
       onClose={onCancel}
       open={open}
-      panelClassName="agent-preset-dialog max-h-[min(780px,calc(100vh-48px))]"
+      panelClassName="agent-preset-dialog max-h-[min(780px,calc(var(--octopus-viewport-height,100dvh)-24px))]"
       size="default"
     >
-      <form className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-5 text-base leading-normal tracking-normal" onSubmit={submit}>
+      <form className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-4 py-4 sm:px-5 sm:py-5 text-base leading-normal tracking-normal" onSubmit={submit}>
         <OcDialogHeader
           className="p-0 pb-3"
           description={readOnly
@@ -288,7 +288,7 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
             </div>
           </section>
 
-          <section className="grid grid-cols-2 gap-3">
+          <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <OcSelect
               disabled={busy || readOnly || modelsLoading}
               label="Model"
@@ -422,7 +422,7 @@ function AgentChoiceDisclosure({ description, empty, items, open, readOnly, sele
       >
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-medium text-token-foreground">{title}</span>
-          <span className="mt-0.5 block truncate text-xs leading-4 text-token-description-foreground">{description}</span>
+          <span className="mt-0.5 block break-words text-xs leading-4 text-token-description-foreground sm:truncate">{description}</span>
         </span>
         <span className="shrink-0 text-sm text-token-description-foreground">
           {choosableItems.length ? `${selectedCount} of ${choosableItems.length}` : "None"}

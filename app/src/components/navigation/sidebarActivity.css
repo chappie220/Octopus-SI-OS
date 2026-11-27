@@ -52,6 +52,36 @@
 }
 .octopus-task-row:is(:hover, :focus-visible, :focus-within) .sidebar-task-trailing:has(> .sidebar-task-action) > :not(.sidebar-task-action) { opacity: 0; }
 
+/* On touch devices and mobile drawer, hover is unavailable: keep task & project action menus directly tappable */
+@media (hover: none), (pointer: coarse), (max-width: 767px) {
+  .sidebar-task-trailing {
+    gap: 4px;
+  }
+
+  .sidebar-task-action {
+    position: static;
+    top: auto;
+    right: auto;
+    transform: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .octopus-task-row:is(:hover, :focus-visible, :focus-within) .sidebar-task-trailing:has(> .sidebar-task-action) > :not(.sidebar-task-action) {
+    opacity: 1;
+  }
+
+  .sidebar-task-action button,
+  .sidebar-project-action button {
+    min-width: 28px !important;
+    min-height: 28px !important;
+  }
+
+  .sidebar-project-action {
+    display: block !important;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sidebar-task-status-orbit,
   .sidebar-task-status-dot { animation: none; }

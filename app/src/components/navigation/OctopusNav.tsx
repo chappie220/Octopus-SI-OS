@@ -399,7 +399,7 @@ export function OctopusProjectRow({
         </div>
       </div>
       {action ? (
-        <div className="mr-1 hidden min-w-[26px] shrink-0 group-hover:block group-focus-visible:block">
+        <div className="sidebar-project-action mr-1 hidden min-w-[26px] shrink-0 group-hover:block group-focus-visible:block">
           <div className="flex items-center justify-end">
             <RowActionButton action={action} />
           </div>

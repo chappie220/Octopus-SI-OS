@@ -425,7 +425,16 @@ function createClient(environment, dependencies = {}) {
   async function mutate(request) {
     await requireReady();
     store.invalidate();
-    const [scope, { raw }] = await Promise.all([read("projection.operator.os.scope"), contextData()]);
+    const needsChatContexts = [
+      "create_agent_template",
+      "configure_agent_template",
+      "delete_agent_template",
+    ].includes(request?.action);
+    const [scope, contexts] = await Promise.all([
+      read("projection.operator.os.scope"),
+      needsChatContexts ? contextData() : Promise.resolve({ raw: null }),
+    ]);
+    const raw = contexts.raw;
     const chat = await loader.load();
     const { taskLifecycle, retirementBarrier } = await chat.loadOperatorTaskLifecycle(submitOptions);
     const result = await mutateOctopusOsWorkspace(registryRoot, env.home, scope, request, {
