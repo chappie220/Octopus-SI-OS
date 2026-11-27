@@ -1,0 +1,111 @@
+name: build-linux-alpine
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Alpine Linux target architecture
+        type: choice
+        default: aarch64
+        options:
+          - aarch64
+          - x86_64
+
+permissions:
+  contents: read
+
+jobs:
+  alpine-musl:
+    runs-on: ${{ inputs.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    container:
+      image: node:24-alpine
+    timeout-minutes: 300
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTFLAGS: "-C target-feature=-crt-static"
+      TARGET_TRIPLE: ${{ inputs.arch == 'x86_64' && 'x86_64-unknown-linux-musl' || 'aarch64-unknown-linux-musl' }}
+    steps:
+      - name: Install Alpine build and verification packages
+        run: |
+          apk add --no-cache \
+            bash \
+            binutils \
+            build-base \
+            ca-certificates \
+            curl \
+            fish \
+            git \
+            libgcc \
+            libstdc++ \
+            openrc \
+            openssl-dev \
+            pkgconf \
+            python3 \
+            sqlite-dev \
+            alsa-lib-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain (musl)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --default-host "$TARGET_TRIPLE"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Fish, OpenRC script syntax, and Node musl target detection
+        run: |
+          fish -c 'printf "fish-c-ok\n"' | grep -qx 'fish-c-ok'
+          fish -lc 'printf "fish-lc-ok\n"' | grep -qx 'fish-lc-ok'
+          sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/install-linux.sh
+          sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/octopus-process-authority.openrc
+          node -e 'const { detectLinuxLibc, hostTarget } = require("./app/scripts/cli-target.cjs"); const libc = detectLinuxLibc(); const triple = hostTarget(); console.log({ libc, triple }); if (libc !== "musl" || triple !== process.env.TARGET_TRIPLE) process.exit(1);'
+          node --test app/scripts/test-cli-target.cjs app/scripts/test-indexed-ledger-projection.cjs
+
+      - name: Run focused Rust tests for Fish, OpenRC, and Alpine musl
+        run: |
+          cargo test --locked \
+            -p octopus-linux-process-authority \
+            -p octopus-shell-command \
+            -p octopus-system-workspace-env \
+            -p octopus-applypatch
+
+      - name: Install client dependencies
+        run: npm ci --prefix app
+
+      - name: Build CLI distribution (Alpine musl)
+        run: npm --prefix app run build:cli -- --target="$TARGET_TRIPLE"
+
+      - name: Build web client
+        run: npm --prefix app run build
+
+      - name: Verify musl build outputs
+        shell: bash
+        run: |
+          runtime=app/build/cli/runtime
+          provider="$runtime/local-packages/registry/interface/world_provider_codex/packages/octopus-provider-codex"
+          life="$provider/life-bin/octopus-provider-opencodex-life"
+          test -f app/dist/index.html
+          test -x "$runtime/bin/octopus"
+          test -x "$runtime/bin/octopus-linux-process-authority"
+          test -x "$life"
+          readelf -l "$runtime/bin/octopus" | grep -q 'ld-musl-'
+          readelf -l "$runtime/bin/octopus-linux-process-authority" | grep -q 'ld-musl-'
+          cat "$runtime/runtime-build-receipt.json"
+          {
+            echo "### Alpine Linux musl runtime ($TARGET_TRIPLE)"
+            echo
+            echo "Commit: \`$(git rev-parse HEAD)\`"
+            echo
+            echo '```text'
+            sha256sum "$runtime/bin/octopus" "$runtime/bin/octopus-linux-process-authority" "$life"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Alpine Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: octopus-linux-alpine-${{ inputs.arch || 'aarch64' }}
+          path: app/build
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

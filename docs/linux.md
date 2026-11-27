@@ -27,6 +27,16 @@ and ALSA development headers. On Debian/Ubuntu:
 sudo apt-get install build-essential pkg-config libssl-dev libsqlite3-dev libasound2-dev
 ```
 
+On Alpine Linux (musl):
+
+```sh
+apk add build-base pkgconf openssl-dev sqlite-dev alsa-lib-dev libgcc libstdc++ git nodejs npm rust cargo
+```
+
+Because Alpine links system libraries (`openssl`, `sqlite`, `alsa-lib`) dynamically
+against musl, set `RUSTFLAGS="-C target-feature=-crt-static"` when building Rust
+binaries on Alpine (`aarch64-unknown-linux-musl` or `x86_64-unknown-linux-musl`).
+
 ALSA headers are needed by the audio capability built with the workspace and
 CLI distribution, even when the runtime is used headlessly. These build
 prerequisites are separate from the process-isolation service below.
@@ -34,17 +44,26 @@ prerequisites are separate from the process-isolation service below.
 ## Install the platform component
 
 The backend requires Linux 6.5 or later, AppArmor 4 or later, the AppArmor 4.0
-policy ABI, systemd and cgroup v2. It has no distribution-specific execution
-branch. The installation must provide `/usr/sbin/apparmor_parser`,
-`/etc/apparmor.d/abi/4.0` and `apparmor.service`. Enforced launches are unavailable
-on systems without these prerequisites.
+policy ABI, cgroup v2, and either systemd or OpenRC. It has no
+distribution-specific execution branch. The installation must provide
+`/usr/sbin/apparmor_parser` or `/sbin/apparmor_parser`,
+`/etc/apparmor.d/abi/4.0`, and an active AppArmor policy loader service
+(`apparmor.service` on systemd, `apparmor` on OpenRC). On OpenRC, configure
+unified cgroup v2 (`rc_cgroup_mode="unified"` in `/etc/rc.conf`). Enforced
+launches are unavailable on systems without these prerequisites.
 
-Install the distribution's AppArmor package as an administrator. For example,
-on Ubuntu:
+Install the distribution's AppArmor package as an administrator. For example:
 
-```sh
-sudo apt-get install apparmor
-```
+- Debian/Ubuntu:
+  ```sh
+  sudo apt-get install apparmor
+  ```
+- Alpine Linux:
+  ```sh
+  apk add apparmor apparmor-utils
+  rc-update add apparmor boot
+  rc-service apparmor start
+  ```
 
 The Linux CLI runtime distribution includes the service as
 `bin/octopus-linux-process-authority`. To build the service separately from source:
@@ -60,6 +79,11 @@ with that account's login:
 sudo sh registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/install-linux.sh \
   "$PWD/target/release/octopus-linux-process-authority" operator
 ```
+
+`install-linux.sh` detects systemd or OpenRC automatically. On OpenRC it installs
+`/etc/init.d/octopus-process-authority` (using `supervise-daemon` with `fd:3`
+readiness notification) and `/etc/conf.d/octopus-process-authority`, enables the
+service in the `default` runlevel, and starts it.
 
 Start a new login session so the account receives its `octopus-process` group.
 Run Octopus as that account. The service does not start Octopus, execute tool
@@ -91,15 +115,22 @@ denied by path to every other process.
 
 If AppArmor is active but its parser reports that the kernel cannot enforce the
 fine-grained Unix socket rule, install the updated process-authority binary and
-set this systemd override with `sudo systemctl edit octopus-process-authority.service`:
+set `OCTOPUS_APPARMOR_UNIX_COMPAT=1`:
 
-```ini
-[Service]
-Environment=OCTOPUS_APPARMOR_UNIX_COMPAT=1
-```
+- On systemd (`sudo systemctl edit octopus-process-authority.service`):
+  ```ini
+  [Service]
+  Environment=OCTOPUS_APPARMOR_UNIX_COMPAT=1
+  ```
+  Then run `sudo systemctl restart octopus-process-authority.service`.
 
-Run `sudo systemctl restart octopus-process-authority.service`, then restart
-the Octopus runtime for the same Home so its interfaces are launched again.
+- On OpenRC (`/etc/conf.d/octopus-process-authority`):
+  ```sh
+  OCTOPUS_APPARMOR_UNIX_COMPAT="1"
+  ```
+  Then run `rc-service octopus-process-authority restart`.
+
+Restart the Octopus runtime for the same Home so its interfaces are launched again.
 This option uses AppArmor's family-and-type network rules. Processes without
 network or local IPC authority can use Unix stream and seqpacket sockets
 (including unnamed socket pairs used by event loops and Rust's process spawner).
@@ -141,9 +172,18 @@ No filesystem mount or second sandbox backend is involved.
 
 ## Diagnostics and scope
 
+On systemd:
+
 ```sh
 systemctl status octopus-process-authority.service
 journalctl -u octopus-process-authority.service
+```
+
+On OpenRC:
+
+```sh
+rc-service octopus-process-authority status
+cat /var/log/octopus-process-authority.log
 ```
 
 The service reports profile compilation, peer identity, attachment and cleanup

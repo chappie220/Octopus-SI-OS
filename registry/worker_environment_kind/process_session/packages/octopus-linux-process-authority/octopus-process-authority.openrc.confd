@@ -1,0 +1,5 @@
+# Configuration for /etc/init.d/octopus-process-authority on OpenRC.
+#
+# Uncomment on kernels whose AppArmor parser cannot enforce fine-grained Unix
+# socket mediation rules (see docs/linux.md).
+#OCTOPUS_APPARMOR_UNIX_COMPAT="1"

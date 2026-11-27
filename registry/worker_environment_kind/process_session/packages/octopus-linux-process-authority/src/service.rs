@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const STATE: &str = "/run/octopus-process-authority/leases";
-const PARSER: &str = "/usr/sbin/apparmor_parser";
+const PARSERS: [&str; 2] = ["/usr/sbin/apparmor_parser", "/sbin/apparmor_parser"];
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +37,7 @@ struct Lease {
 
 struct Host {
     cgroup: PathBuf,
+    parser: PathBuf,
     leases: Mutex<BTreeMap<String, Lease>>,
     unix_mediation: UnixSocketMediation,
 }
@@ -62,7 +63,7 @@ pub fn serve() -> Result<(), String> {
         }
         _ => return Err("OCTOPUS_APPARMOR_UNIX_COMPAT must be unset or 1".into()),
     };
-    secure_file(Path::new(PARSER), false)?;
+    let parser = resolve_parser()?;
     secure_directory(Path::new("/run/octopus-process-authority"))?;
     let _ownership = service_lock()?;
     if !Path::new(STATE).exists() {
@@ -75,6 +76,7 @@ pub fn serve() -> Result<(), String> {
     let cgroup = own_cgroup()?;
     let host = Arc::new(Host {
         cgroup,
+        parser,
         leases: Mutex::new(BTreeMap::new()),
         unix_mediation,
     });
@@ -229,7 +231,7 @@ impl Host {
             )?;
             fs::rename(&preparing, &directory).map_err(display)?;
             fs::create_dir(self.cgroup.join(&profile)).map_err(display)?;
-            load_profile(&directory, &profile, self.unix_mediation)?;
+            load_profile(&self.parser, &directory, &profile, self.unix_mediation)?;
             if !profile_loaded(&profile)? {
                 return Err("AppArmor did not enforce the loaded profile".into());
             }
@@ -400,7 +402,7 @@ impl Host {
         }
         let directory = Path::new(STATE).join(&record.profile);
         if profile_loaded(&record.profile)? {
-            remove_profile(&record.profile)?;
+            remove_profile(&self.parser, &record.profile)?;
         }
         if cgroup.exists() {
             fs::remove_dir(&cgroup).map_err(display)?;
@@ -430,10 +432,19 @@ impl Host {
 }
 
 fn notify_ready() -> Result<(), String> {
+    if let Some(path) = std::env::var_os("NOTIFY_SOCKET") {
+        return notify_ready_socket(&path);
+    }
+    if let Some(fd) = std::env::var_os("OCTOPUS_READY_FD") {
+        return notify_ready_fd(&fd);
+    }
+    Err("service readiness channel is absent (set NOTIFY_SOCKET or OCTOPUS_READY_FD)".into())
+}
+
+fn notify_ready_socket(path: &std::ffi::OsStr) -> Result<(), String> {
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::net::{SocketAddr, UnixDatagram};
-    let path = std::env::var_os("NOTIFY_SOCKET").ok_or("systemd readiness socket is absent")?;
     let address = if let Some(name) = path.as_bytes().strip_prefix(b"@") {
         SocketAddr::from_abstract_name(name).map_err(display)?
     } else {
@@ -442,8 +453,23 @@ fn notify_ready() -> Result<(), String> {
     let socket = UnixDatagram::unbound().map_err(display)?;
     let message = b"READY=1";
     if socket.send_to_addr(message, &address).map_err(display)? != message.len() {
-        return Err("systemd readiness notification was incomplete".into());
+        return Err("service readiness notification was incomplete".into());
     }
+    Ok(())
+}
+
+fn notify_ready_fd(value: &std::ffi::OsStr) -> Result<(), String> {
+    let raw = value
+        .to_str()
+        .ok_or("OCTOPUS_READY_FD must be a valid integer file descriptor")?;
+    let fd: i32 = raw
+        .parse()
+        .map_err(|_| "OCTOPUS_READY_FD must be a valid integer file descriptor")?;
+    if fd < 3 {
+        return Err("OCTOPUS_READY_FD must be >= 3".into());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(b"\n").map_err(display)?;
     Ok(())
 }
 
@@ -484,7 +510,7 @@ fn own_cgroup() -> Result<PathBuf, String> {
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
-        return Err("process authority must run in its own delegated systemd cgroup".into());
+        return Err("process authority must run in its own delegated cgroup v2 subtree".into());
     }
     let root = Path::new("/sys/fs/cgroup").join(relative);
     if !root.join("cgroup.events").is_file() {
@@ -493,8 +519,31 @@ fn own_cgroup() -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn parser_command() -> Command {
-    let mut parser = Command::new(PARSER);
+fn resolve_parser() -> Result<PathBuf, String> {
+    resolve_parser_from(&PARSERS)
+}
+
+fn resolve_parser_from(candidates: &[&str]) -> Result<PathBuf, String> {
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => continue,
+            Ok(_) => {
+                secure_file(path, false)?;
+                return Ok(path.to_path_buf());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(display(error)),
+        }
+    }
+    Err(format!(
+        "apparmor_parser was not found as a protected regular file at {}",
+        candidates.join(" or ")
+    ))
+}
+
+fn parser_command(parser_path: &Path) -> Command {
+    let mut parser = Command::new(parser_path);
     parser
         .env_clear()
         .env("LC_ALL", "C")
@@ -509,13 +558,14 @@ fn parser_command() -> Command {
 }
 
 fn load_profile(
+    parser_path: &Path,
     directory: &Path,
     profile: &str,
     unix_mediation: UnixSocketMediation,
 ) -> Result<(), String> {
     let policy = directory.join("policy");
     secure_file(&policy, true)?;
-    let mut parser = parser_command();
+    let mut parser = parser_command(parser_path);
     if unix_mediation == UnixSocketMediation::FamilyAndType {
         let output = parser
             .arg("--stdout")
@@ -532,7 +582,7 @@ fn load_profile(
         }
         let compiled = directory.join("policy.bin");
         write_new(&compiled, &output.stdout)?;
-        parser = parser_command();
+        parser = parser_command(parser_path);
         parser.arg("--binary").arg("--add").arg(&compiled);
     } else {
         parser.arg("--add").arg(&policy);
@@ -541,8 +591,8 @@ fn load_profile(
     check_parser_output("--add", &output, None)
 }
 
-fn remove_profile(profile: &str) -> Result<(), String> {
-    let mut parser = parser_command()
+fn remove_profile(parser_path: &Path, profile: &str) -> Result<(), String> {
+    let mut parser = parser_command(parser_path)
         .args(["--Werror", "--remove"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -675,7 +725,10 @@ fn display(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_parser_output, enforced_profile_name};
+    use super::{check_parser_output, enforced_profile_name, notify_ready_fd, resolve_parser_from};
+    use std::ffi::OsStr;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
 
@@ -724,5 +777,25 @@ mod tests {
             enforced_profile_name(&format!("{profile}//&other//&unconfined (enforce)")),
             None
         );
+    }
+
+    #[test]
+    fn readiness_fd_writes_newline_and_rejects_invalid_descriptors() {
+        for invalid in ["", "0", "1", "2", "-1", "abc"] {
+            assert!(notify_ready_fd(OsStr::new(invalid)).is_err(), "{invalid}");
+        }
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        notify_ready_fd(OsStr::new(&fds[1].to_string())).unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"\n");
+    }
+
+    #[test]
+    fn parser_resolution_fails_closed_when_candidates_are_missing() {
+        let missing = resolve_parser_from(&["/nonexistent/usr/sbin/apparmor_parser", "/nonexistent/sbin/apparmor_parser"]);
+        assert!(missing.is_err());
     }
 }

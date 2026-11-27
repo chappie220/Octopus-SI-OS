@@ -252,6 +252,10 @@ fn project(authority: &ProcessAuthority, executable: &Path) -> Result<LinuxProce
         "/etc/passwd",
         "/etc/group",
         "/etc/nsswitch.conf",
+        "/etc/fish",
+        "/usr/share/fish",
+        "/etc/terminfo",
+        "/usr/share/terminfo",
         "/dev/random",
         "/dev/urandom",
     ] {
@@ -269,6 +273,7 @@ fn project(authority: &ProcessAuthority, executable: &Path) -> Result<LinuxProce
     if authority.allow_network {
         for path in [
             "/etc/ssl/certs",
+            "/etc/ssl/cert.pem",
             "/usr/share/ca-certificates",
             "/etc/hosts",
             "/etc/resolv.conf",
@@ -1115,8 +1120,14 @@ mod tests {
 
     #[test]
     fn the_installed_parser_accepts_every_profile_shape() {
-        let parser = Path::new("/usr/sbin/apparmor_parser");
-        if !parser.is_file() || !Path::new("/etc/apparmor.d/abi/4.0").is_file() {
+        let Some(parser) = ["/usr/sbin/apparmor_parser", "/sbin/apparmor_parser"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file())
+        else {
+            return;
+        };
+        if !Path::new("/etc/apparmor.d/abi/4.0").is_file() {
             return;
         }
         let directory = std::env::temp_dir().join(format!("octopus-apparmor-shapes-{}", std::process::id()));

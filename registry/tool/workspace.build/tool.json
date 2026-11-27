@@ -8,7 +8,7 @@
     "default_max_output_bytes": 131072,
     "max_output_bytes": 1048576,
     "default_shell": "sh",
-    "allowed_shells": ["sh", "bash", "zsh"],
+    "allowed_shells": ["sh", "bash", "zsh", "fish"],
     "allow_login_shell": true
   },
   "process": {
@@ -21,7 +21,8 @@
       "optional_write_root_slots": ["host_filesystem_root", "platform_toolchain_root"],
       "optional_executable_root_slots": ["host_filesystem_root", "platform_toolchain_root", "tool_cache_root", "toolchain_root"],
       "read_paths": [], "write_paths": [], "executable_paths": [],
-      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "executable_commands": ["git", "sh"],
+      "optional_executable_commands": ["bash", "zsh", "fish"],
       "read_env_paths": [], "write_env_paths": [], "executable_env_paths": ["PATH"],
       "allow_network": true, "allow_local_ipc": true, "allow_sandbox_delegation": true, "allow_process_signals": true
     }
@@ -37,7 +38,7 @@
           {"type": "string", "minLength": 1}
         ]
       },
-      "shell": {"type": "string", "enum": ["sh", "bash", "zsh"]},
+      "shell": {"type": "string", "enum": ["sh", "bash", "zsh", "fish"]},
       "login": {"type": "boolean"},
       "workdir": {"type": "string"},
       "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 1800000, "description": "Execution deadline. Defaults to 600000 ms, at most 1800000 ms; the call returns when the command exits or the deadline stops it."},

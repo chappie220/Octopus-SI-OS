@@ -7,6 +7,7 @@ use serde::Serialize;
 pub enum ShellType {
     Zsh,
     Bash,
+    Fish,
     PowerShell,
     Sh,
     Cmd,
@@ -17,6 +18,7 @@ impl ShellType {
         match self {
             Self::Zsh => "zsh",
             Self::Bash => "bash",
+            Self::Fish => "fish",
             Self::PowerShell => "powershell",
             Self::Sh => "sh",
             Self::Cmd => "cmd",
@@ -43,6 +45,7 @@ pub fn detect_shell_type(shell_path: impl AsRef<std::path::Path>) -> Option<Shel
         Some("sh") => Some(ShellType::Sh),
         Some("cmd") => Some(ShellType::Cmd),
         Some("bash") => Some(ShellType::Bash),
+        Some("fish") => Some(ShellType::Fish),
         Some("pwsh") => Some(ShellType::PowerShell),
         Some("powershell") => Some(ShellType::PowerShell),
         _ => {
@@ -180,6 +183,22 @@ fn get_bash_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
     })
 }
 
+const FISH_FALLBACK_PATHS: &[&str] = &[
+    "/usr/bin/fish",
+    "/usr/local/bin/fish",
+    "/opt/homebrew/bin/fish",
+    "/bin/fish",
+];
+
+fn get_fish_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
+    let shell_path = get_shell_path(ShellType::Fish, path, "fish", FISH_FALLBACK_PATHS);
+
+    shell_path.map(|shell_path| DetectedShell {
+        shell_type: ShellType::Fish,
+        shell_path,
+    })
+}
+
 const SH_FALLBACK_PATHS: &[&str] = &["/bin/sh"];
 
 fn get_sh_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
@@ -246,6 +265,7 @@ pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Detect
     match shell_type {
         ShellType::Zsh => get_zsh_shell(path),
         ShellType::Bash => get_bash_shell(path),
+        ShellType::Fish => get_fish_shell(path),
         ShellType::PowerShell => get_powershell_shell(path),
         ShellType::Sh => get_sh_shell(path),
         ShellType::Cmd => get_cmd_shell(path),
@@ -268,10 +288,12 @@ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Detecte
             user_default_shell
                 .or_else(|| get_shell(ShellType::Zsh, None))
                 .or_else(|| get_shell(ShellType::Bash, None))
+                .or_else(|| get_shell(ShellType::Fish, None))
         } else {
             user_default_shell
                 .or_else(|| get_shell(ShellType::Bash, None))
                 .or_else(|| get_shell(ShellType::Zsh, None))
+                .or_else(|| get_shell(ShellType::Fish, None))
         };
 
         shell_with_fallback.unwrap_or_else(ultimate_fallback_shell)
@@ -301,7 +323,14 @@ mod tests {
             detect_shell_type(PathBuf::from("powershell")),
             Some(ShellType::PowerShell)
         );
-        assert_eq!(detect_shell_type(PathBuf::from("fish")), None);
+        assert_eq!(
+            detect_shell_type(PathBuf::from("fish")),
+            Some(ShellType::Fish)
+        );
+        assert_eq!(
+            detect_shell_type(PathBuf::from("/usr/bin/fish")),
+            Some(ShellType::Fish)
+        );
         assert_eq!(detect_shell_type(PathBuf::from("other")), None);
         assert_eq!(
             detect_shell_type(PathBuf::from("/bin/zsh")),

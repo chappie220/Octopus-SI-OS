@@ -653,10 +653,19 @@ fn command_strings_use_only_descriptor_owned_shell_and_login_modes() {
         .unwrap(),
         ["zsh", "-c", "printf ready"]
     );
+    assert_eq!(
+        super::workspace_exec::command_argv(
+            "workspace.exec",
+            &json!({"command": "printf fish", "shell": "fish", "login": false}),
+            &config,
+        )
+        .unwrap(),
+        ["fish", "-c", "printf fish"]
+    );
     assert!(
         super::workspace_exec::command_argv(
             "workspace.exec",
-            &json!({"command": "printf refused", "shell": "fish"}),
+            &json!({"command": "printf refused", "shell": "csh"}),
             &config,
         )
         .is_err()

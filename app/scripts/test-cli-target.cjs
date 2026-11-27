@@ -7,15 +7,26 @@ const { SUPPORTED_TARGETS, hostTarget, resolveCliTarget, takeTargetArgument } = 
 const { planTree, copyEntries, copyTree, copyFile } = require("./package-copy.cjs");
 
 test("a CLI distribution resolves the target of the machine that builds it", () => {
-  assert.deepEqual(SUPPORTED_TARGETS, ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]);
-  for (const [platform, architecture, triple] of [
-    ["darwin", "arm64", "aarch64-apple-darwin"], ["darwin", "x64", "x86_64-apple-darwin"],
-    ["linux", "arm64", "aarch64-unknown-linux-gnu"], ["linux", "x64", "x86_64-unknown-linux-gnu"],
+  assert.deepEqual(SUPPORTED_TARGETS, [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+  ]);
+  for (const [platform, architecture, libc, triple] of [
+    ["darwin", "arm64", undefined, "aarch64-apple-darwin"],
+    ["darwin", "x64", undefined, "x86_64-apple-darwin"],
+    ["linux", "arm64", "gnu", "aarch64-unknown-linux-gnu"],
+    ["linux", "arm64", "musl", "aarch64-unknown-linux-musl"],
+    ["linux", "x64", "gnu", "x86_64-unknown-linux-gnu"],
+    ["linux", "x64", "musl", "x86_64-unknown-linux-musl"],
   ]) {
-    assert.equal(hostTarget(platform, architecture), triple);
-    const implied = resolveCliTarget({ platform, architecture });
+    assert.equal(hostTarget(platform, architecture, libc), triple);
+    const implied = resolveCliTarget({ platform, architecture, libc });
     assert.deepEqual([implied.triple, implied.platform, implied.architecture], [triple, platform, architecture]);
-    assert.deepEqual(resolveCliTarget({ platform, architecture, target: triple }), implied);
+    assert.deepEqual(resolveCliTarget({ platform, architecture, libc, target: triple }), implied);
   }
 });
 
@@ -24,16 +35,23 @@ test("a Linux distribution is headless and a macOS one keeps every macOS part", 
   assert.deepEqual(resolveCliTarget({ platform: "darwin", architecture: "arm64" }).components, all(true));
   assert.deepEqual(resolveCliTarget({ platform: "darwin", architecture: "x64" }).components, all(true));
   for (const architecture of ["x64", "arm64"]) {
-    assert.deepEqual(resolveCliTarget({ platform: "linux", architecture }).components, { ...all(false), managed_codex: true });
+    for (const libc of ["gnu", "musl"]) {
+      assert.deepEqual(resolveCliTarget({ platform: "linux", architecture, libc }).components, { ...all(false), managed_codex: true });
+    }
   }
 });
 
 test("an unsupported host, an unknown target and a cross build are refused by name", () => {
   assert.throws(() => hostTarget("win32", "x64"), /not built on win32-x64; supported targets: aarch64-apple-darwin/);
-  assert.throws(() => hostTarget("linux", "riscv64"), /not built on linux-riscv64/);
+  assert.throws(() => hostTarget("linux", "riscv64", "gnu"), /not built on linux-riscv64-gnu/);
+  assert.throws(() => hostTarget("linux", "x64", "uclibc"), /not built on linux-x64-uclibc/);
   assert.throws(() => resolveCliTarget({ platform: "freebsd", architecture: "x64" }), /not built on freebsd-x64/);
-  assert.throws(() => resolveCliTarget({ platform: "linux", architecture: "x64", target: "x86_64-unknown-linux-musl" }), /Unknown CLI target 'x86_64-unknown-linux-musl'/);
-  assert.throws(() => resolveCliTarget({ platform: "linux", architecture: "x64", target: "aarch64-unknown-linux-gnu" }),
+  assert.throws(() => resolveCliTarget({ platform: "linux", architecture: "x64", libc: "gnu", target: "riscv64gc-unknown-linux-gnu" }), /Unknown CLI target 'riscv64gc-unknown-linux-gnu'/);
+  assert.throws(() => resolveCliTarget({ platform: "linux", architecture: "x64", libc: "gnu", target: "x86_64-unknown-linux-musl" }),
+    /x86_64-unknown-linux-musl cannot be built on x86_64-unknown-linux-gnu/);
+  assert.throws(() => resolveCliTarget({ platform: "linux", architecture: "arm64", libc: "musl", target: "aarch64-unknown-linux-gnu" }),
+    /aarch64-unknown-linux-gnu cannot be built on aarch64-unknown-linux-musl/);
+  assert.throws(() => resolveCliTarget({ platform: "linux", architecture: "x64", libc: "gnu", target: "aarch64-unknown-linux-gnu" }),
     /aarch64-unknown-linux-gnu cannot be built on x86_64-unknown-linux-gnu/);
   assert.throws(() => resolveCliTarget({ platform: "darwin", architecture: "arm64", target: "x86_64-unknown-linux-gnu" }),
     /x86_64-unknown-linux-gnu cannot be built on aarch64-apple-darwin/);

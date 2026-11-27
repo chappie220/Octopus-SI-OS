@@ -1418,7 +1418,8 @@ fn normalize_tokens(cmd: &[String]) -> Vec<String> {
         }
         [first, pipe, rest @ ..] if (first == "no" || first == "n") && pipe == "|" => rest.to_vec(),
         [shell, flag, script]
-            if (shell == "bash" || shell == "zsh") && (flag == "-c" || flag == "-lc") =>
+            if matches!(shell.as_str(), "bash" | "zsh" | "fish" | "sh")
+                && (flag == "-c" || flag == "-lc") =>
         {
             shlex_split(script).unwrap_or_else(|| vec![shell.clone(), flag.clone(), script.clone()])
         }

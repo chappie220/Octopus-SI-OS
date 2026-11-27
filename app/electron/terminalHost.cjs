@@ -359,8 +359,17 @@ function resolveShell() {
   if (process.platform === "win32") {
     return { file: process.env.COMSPEC || "powershell.exe", args: [] };
   }
-  const file = process.env.SHELL || "/bin/zsh";
-  return { file: absoluteExistingFile(file, "user shell"), args: [] };
+  if (process.env.SHELL) {
+    return { file: absoluteExistingFile(process.env.SHELL, "user shell"), args: [] };
+  }
+  for (const candidate of ["/bin/zsh", "/usr/bin/fish", "/usr/local/bin/fish", "/bin/bash", "/usr/bin/bash", "/bin/ash", "/bin/sh"]) {
+    try {
+      return { file: absoluteExistingFile(candidate, "user shell"), args: [] };
+    } catch {
+      continue;
+    }
+  }
+  return { file: absoluteExistingFile("/bin/sh", "user shell"), args: [] };
 }
 
 function waitForExit(host, sessionId) {

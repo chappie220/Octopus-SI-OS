@@ -1,8 +1,12 @@
+const fs = require("node:fs");
+
 const TARGETS = Object.freeze({
   "aarch64-apple-darwin": Object.freeze({ platform: "darwin", architecture: "arm64" }),
   "x86_64-apple-darwin": Object.freeze({ platform: "darwin", architecture: "x64" }),
-  "aarch64-unknown-linux-gnu": Object.freeze({ platform: "linux", architecture: "arm64" }),
-  "x86_64-unknown-linux-gnu": Object.freeze({ platform: "linux", architecture: "x64" }),
+  "aarch64-unknown-linux-gnu": Object.freeze({ platform: "linux", architecture: "arm64", libc: "gnu" }),
+  "aarch64-unknown-linux-musl": Object.freeze({ platform: "linux", architecture: "arm64", libc: "musl" }),
+  "x86_64-unknown-linux-gnu": Object.freeze({ platform: "linux", architecture: "x64", libc: "gnu" }),
+  "x86_64-unknown-linux-musl": Object.freeze({ platform: "linux", architecture: "x64", libc: "musl" }),
 });
 const SUPPORTED_TARGETS = Object.freeze(Object.keys(TARGETS).sort());
 
@@ -11,14 +15,43 @@ const COMPONENTS = Object.freeze({
   linux: Object.freeze({ client_filesystem: false, desktop_native: false, managed_codex: true, code_signing: false }),
 });
 
-function hostTarget(platform = process.platform, architecture = process.arch) {
-  const found = SUPPORTED_TARGETS.find((triple) => TARGETS[triple].platform === platform && TARGETS[triple].architecture === architecture);
-  if (!found) throw new Error(`The Octopus CLI distribution is not built on ${platform}-${architecture}; supported targets: ${SUPPORTED_TARGETS.join(", ")}`);
+function detectLinuxLibc() {
+  try {
+    const header = process.report?.getReport?.()?.header;
+    if (header && typeof header.glibcVersionRuntime === "string" && header.glibcVersionRuntime.length > 0) {
+      return "gnu";
+    }
+  } catch {
+    // Fall through to filesystem probe when process.report is unavailable.
+  }
+  if (
+    fs.existsSync("/etc/alpine-release")
+    || fs.existsSync("/lib/ld-musl-aarch64.so.1")
+    || fs.existsSync("/lib/ld-musl-x86_64.so.1")
+  ) {
+    return "musl";
+  }
+  return "gnu";
+}
+
+function hostTarget(platform = process.platform, architecture = process.arch, libc = undefined) {
+  const resolvedLibc = platform === "linux"
+    ? (libc ?? (platform === process.platform ? detectLinuxLibc() : "gnu"))
+    : undefined;
+  const found = SUPPORTED_TARGETS.find((triple) => {
+    const entry = TARGETS[triple];
+    if (entry.platform !== platform || entry.architecture !== architecture) return false;
+    return platform === "linux" ? entry.libc === resolvedLibc : true;
+  });
+  if (!found) {
+    const hostLabel = platform === "linux" && resolvedLibc ? `${platform}-${architecture}-${resolvedLibc}` : `${platform}-${architecture}`;
+    throw new Error(`The Octopus CLI distribution is not built on ${hostLabel}; supported targets: ${SUPPORTED_TARGETS.join(", ")}`);
+  }
   return found;
 }
 
-function resolveCliTarget({ platform = process.platform, architecture = process.arch, target = null } = {}) {
-  const host = hostTarget(platform, architecture);
+function resolveCliTarget({ platform = process.platform, architecture = process.arch, libc = undefined, target = null } = {}) {
+  const host = hostTarget(platform, architecture, libc);
   if (target !== null && !Object.hasOwn(TARGETS, target)) {
     throw new Error(`Unknown CLI target '${target}'; supported targets: ${SUPPORTED_TARGETS.join(", ")}`);
   }
@@ -41,4 +74,4 @@ function takeTargetArgument(argv) {
   return { target, rest };
 }
 
-module.exports = { SUPPORTED_TARGETS, hostTarget, resolveCliTarget, takeTargetArgument };
+module.exports = { SUPPORTED_TARGETS, detectLinuxLibc, hostTarget, resolveCliTarget, takeTargetArgument };

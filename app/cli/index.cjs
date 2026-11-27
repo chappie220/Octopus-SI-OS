@@ -51,7 +51,7 @@ Options:
   --attach <path>                 Attach a file or folder; repeatable
   --access <mode>                 New task access: project_access or full_access
   --json                          JSON results; NDJSON for streamed work
-  --foreground                    Keep 'up' attached in the foreground (for systemd)
+  --foreground                    Keep 'up' attached in the foreground (for systemd or OpenRC)
   --no-wait                       Return the input admission receipt
   --timeout <seconds>             Stop waiting at a deadline, leave task running
                                   up: omitted or 0 uses the 120-second default

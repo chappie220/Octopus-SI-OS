@@ -15,7 +15,7 @@
     "max_input_bytes": 65536,
     "cleanup_timeout_ms": 10000,
     "default_shell": "sh",
-    "allowed_shells": ["sh", "bash", "zsh"],
+    "allowed_shells": ["sh", "bash", "zsh", "fish"],
     "allow_login_shell": true
   },
   "process": {
@@ -32,7 +32,8 @@
       "read_paths": [],
       "write_paths": [],
       "executable_paths": [],
-      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "executable_commands": ["git", "sh"],
+      "optional_executable_commands": ["bash", "zsh", "fish"],
       "read_env_paths": [],
       "write_env_paths": [],
       "executable_env_paths": ["PATH"],
@@ -66,7 +67,7 @@
       },
       "shell": {
         "type": "string",
-        "enum": ["sh", "bash", "zsh"],
+        "enum": ["sh", "bash", "zsh", "fish"],
         "description": "Shell for a command string. Defaults to sh."
       },
       "login": {

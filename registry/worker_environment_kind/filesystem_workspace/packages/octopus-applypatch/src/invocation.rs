@@ -62,7 +62,9 @@ fn classify_shell_name(shell: &str, convention: PathConvention) -> Option<String
 
 fn classify_shell(shell: &str, flag: &str, convention: PathConvention) -> Option<ApplyPatchShell> {
     classify_shell_name(shell, convention).and_then(|name| match name.as_str() {
-        "bash" | "zsh" | "sh" if matches!(flag, "-lc" | "-c") => Some(ApplyPatchShell::Unix),
+        "bash" | "zsh" | "sh" | "fish" if matches!(flag, "-lc" | "-c") => {
+            Some(ApplyPatchShell::Unix)
+        }
         "pwsh" | "powershell" if flag.eq_ignore_ascii_case("-command") => {
             Some(ApplyPatchShell::PowerShell)
         }

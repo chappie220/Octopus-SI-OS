@@ -1,0 +1,41 @@
+#!/sbin/openrc-run
+
+name="octopus-process-authority"
+description="Octopus process authority for Linux"
+
+command="/usr/libexec/octopus/octopus-linux-process-authority"
+command_user="root:octopus-process"
+umask="0007"
+supervisor="supervise-daemon"
+notify="fd:3"
+supervise_daemon_args="${supervise_daemon_args:-} --env OCTOPUS_READY_FD=3"
+respawn_delay=2
+respawn_max=5
+respawn_period=60
+output_log="/var/log/octopus-process-authority.log"
+error_log="/var/log/octopus-process-authority.log"
+
+depend() {
+    need localmount
+    after apparmor cgroups
+}
+
+start_pre() {
+    if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
+        eerror 'cgroup v2 is required at /sys/fs/cgroup (set rc_cgroup_mode="unified" in /etc/rc.conf)'
+        return 1
+    fi
+    if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" != "Y" ]; then
+        eerror "AppArmor is not enabled"
+        return 1
+    fi
+    if [ -n "${OCTOPUS_APPARMOR_UNIX_COMPAT:-}" ]; then
+        supervise_daemon_args="${supervise_daemon_args} --env OCTOPUS_APPARMOR_UNIX_COMPAT=${OCTOPUS_APPARMOR_UNIX_COMPAT}"
+    fi
+    checkpath --directory --owner root:octopus-process --mode 0750 /run/octopus-process-authority
+    cgroup_path=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' /proc/self/cgroup 2>/dev/null || true)
+    if [ -z "$cgroup_path" ] || [ "$cgroup_path" = "/" ]; then
+        mkdir -p /sys/fs/cgroup/octopus-process-authority
+        printf '%s\n' "$$" > /sys/fs/cgroup/octopus-process-authority/cgroup.procs
+    fi
+}
