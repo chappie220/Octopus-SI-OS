@@ -77,6 +77,8 @@ jobs:
               sh -n registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/octopus-process-authority.openrc
 
               node -e "const { detectLinuxLibc, hostTarget } = require(\"./app/scripts/cli-target.cjs\"); const libc = detectLinuxLibc(); const triple = hostTarget(); console.log({ libc, triple }); if (libc !== \"musl\" || triple !== process.env.TARGET_TRIPLE) process.exit(1);"
+
+              npm ci --prefix app
               node --test app/scripts/test-cli-target.cjs app/scripts/test-indexed-ledger-projection.cjs
 
               cargo test --locked \
@@ -85,7 +87,6 @@ jobs:
                 -p octopus-system-workspace-env \
                 -p octopus-applypatch
 
-              npm ci --prefix app
               npm --prefix app run build:cli -- --target="$TARGET_TRIPLE"
               npm --prefix app run build
 
