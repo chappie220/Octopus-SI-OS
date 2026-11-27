@@ -66,7 +66,7 @@ async function createAgentServer({ environment, port = DEFAULT_PORT, publicOrigi
       "img-src 'self' data: blob:",
       "media-src 'self' blob:",
       "worker-src 'self' blob:",
-      `script-src 'self' 'wasm-unsafe-eval' ${TURNSTILE_ORIGIN}`,
+      `script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' ${TURNSTILE_ORIGIN}`,
       `frame-src 'self' ${TURNSTILE_ORIGIN}`,
       "object-src 'none'",
       "base-uri 'none'",
