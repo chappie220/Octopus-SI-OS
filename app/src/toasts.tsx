@@ -112,6 +112,9 @@ export function useAppErrorToast(error: string | null | undefined) {
   }, [error]);
 }
 
+const MIN_WORKSPACE_ANCHOR_VIEWPORT = 1025;
+const MIN_WORKSPACE_ANCHOR_WIDTH = 420;
+
 export function AppToastViewport({ anchorToWorkspace = false }: { anchorToWorkspace?: boolean }) {
   const items = useSyncExternalStore(
     (listener) => {
@@ -127,22 +130,58 @@ export function AppToastViewport({ anchorToWorkspace = false }: { anchorToWorksp
       setWorkspaceBounds(null);
       return;
     }
-    const workspace = document.querySelector<HTMLElement>(".workspace-pane-primary");
-    if (!workspace) return;
+    let observedWorkspace: HTMLElement | null = null;
+    const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => measure()) : null;
+
     const measure = () => {
+      if (window.innerWidth < MIN_WORKSPACE_ANCHOR_VIEWPORT) {
+        setWorkspaceBounds((current) => (current === null ? current : null));
+        return;
+      }
+      const workspace = document.querySelector<HTMLElement>(".workspace-pane-primary");
+      if (workspace !== observedWorkspace) {
+        if (observedWorkspace) resizeObserver?.unobserve(observedWorkspace);
+        observedWorkspace = workspace;
+        if (observedWorkspace) resizeObserver?.observe(observedWorkspace);
+      }
+      if (!workspace) {
+        setWorkspaceBounds((current) => (current === null ? current : null));
+        return;
+      }
       const rect = workspace.getBoundingClientRect();
+      const usable = (
+        Number.isFinite(rect.left)
+        && Number.isFinite(rect.width)
+        && rect.width >= MIN_WORKSPACE_ANCHOR_WIDTH
+        && rect.left >= 0
+        && rect.left + rect.width <= window.innerWidth + 1
+      );
+      if (!usable) {
+        setWorkspaceBounds((current) => (current === null ? current : null));
+        return;
+      }
+      const left = Math.round(rect.left);
+      const width = Math.round(rect.width);
       setWorkspaceBounds((current) => (
-        current?.left === rect.left && current.width === rect.width
+        current?.left === left && current.width === width
           ? current
-          : { left: rect.left, width: rect.width }
+          : { left, width }
       ));
     };
+
     measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(workspace);
+    const mutationObserver = typeof MutationObserver === "function"
+      ? new MutationObserver(() => {
+        if (!observedWorkspace || !observedWorkspace.isConnected) measure();
+      })
+      : null;
+    if (mutationObserver && document.body) {
+      mutationObserver.observe(document.body, { childList: true, subtree: true });
+    }
     window.addEventListener("resize", measure);
     return () => {
-      observer.disconnect();
+      resizeObserver?.disconnect();
+      mutationObserver?.disconnect();
       window.removeEventListener("resize", measure);
     };
   }, [anchorToWorkspace]);
@@ -153,9 +192,9 @@ export function AppToastViewport({ anchorToWorkspace = false }: { anchorToWorksp
   } as CSSProperties : undefined;
 
   return (
-    <span className="app-toast-viewport" aria-live="polite" style={style}>
+    <div className="app-toast-viewport" aria-live="polite" style={style}>
       {items.map((toast) => <AppToastItem key={toast.id} toast={toast} />)}
-    </span>
+    </div>
   );
 }
 
