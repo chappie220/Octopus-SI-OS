@@ -228,6 +228,7 @@ fn project(authority: &ProcessAuthority, executable: &Path) -> Result<LinuxProce
         (&authority.executable, FileAccess::Execute, false),
         (&authority.readable_exact, FileAccess::Read, true),
         (&authority.writable_exact, FileAccess::Write, true),
+        (&authority.writable_raw_exact, FileAccess::Write, true),
         (&authority.executable_exact, FileAccess::Execute, true),
     ] {
         for path in paths {
@@ -455,6 +456,15 @@ impl LinuxProcessPolicy {
         {
             return Err("AppArmor profile has an invalid identity".into());
         }
+        const PUBLICATION_DFA_COALESCE_THRESHOLD: usize = 12;
+        let coalesce_publication = self
+            .files
+            .iter()
+            .filter(|rule| matches!(rule.selector, FileSelector::Names { .. }))
+            .count()
+            > PUBLICATION_DFA_COALESCE_THRESHOLD;
+        let mut coalesced_publication: BTreeMap<(PathBuf, FileAccess), BTreeSet<String>> =
+            BTreeMap::new();
         let mut lines = BTreeSet::new();
         for rule in &self.files {
             let permissions = match rule.access {
@@ -475,9 +485,37 @@ impl LinuxProcessPolicy {
                     "rk"
                 }
             };
+            if coalesce_publication
+                && matches!(rule.access, FileAccess::Read | FileAccess::Write)
+                && let Some((directory, suffix)) = publication_coalesce_key(&rule.selector)?
+            {
+                // Preserve full selector validation even when coalescing the compiled DFA pattern.
+                let _ = rule.selector.patterns()?;
+                coalesced_publication
+                    .entry((directory, rule.access))
+                    .or_default()
+                    .insert(suffix);
+                continue;
+            }
             for pattern in rule.selector.patterns()? {
                 lines.insert(format!("  \"{pattern}\" {permissions},\n"));
             }
+        }
+        for ((directory, access), suffixes) in coalesced_publication {
+            let permissions = match access {
+                FileAccess::Read => "rk",
+                FileAccess::Write => "rwkl",
+                _ => continue,
+            };
+            let directory = literal_path(&directory)?;
+            let stem = directory.trim_end_matches('/');
+            let pattern = if suffixes.len() == 1 {
+                format!("{stem}/*{}", suffixes.iter().next().unwrap())
+            } else {
+                let joined = suffixes.into_iter().collect::<Vec<_>>().join(",");
+                format!("{stem}/*{{{joined}}}")
+            };
+            lines.insert(format!("  \"{pattern}\" {permissions},\n"));
         }
         let mut profile = format!(
             "abi <abi/4.0>,\nprofile {name} flags=(mediate_deleted) {{\n  signal (receive),\n  signal (send) peer={name},\n  signal (send) peer={name}//&unconfined,\n  ptrace (read, trace) peer={name},\n  ptrace (read, trace) peer={name}//&unconfined,\n  ptrace (readby, tracedby),\n"
@@ -591,6 +629,54 @@ impl FileSelector {
                 )])
             }
         }
+    }
+}
+
+fn publication_coalesce_key(selector: &FileSelector) -> Result<Option<(PathBuf, String)>, String> {
+    const COORDINATION_DIR: &str = ".octopus-publication";
+    const COORDINATION_SUFFIXES: &[&str] = &[
+        ".lock",
+        ".pending",
+        ".install",
+        ".directory",
+        ".reclaim",
+        ".plan",
+        ".bytes",
+        ".preimage",
+        ".receipt",
+        ".tmp",
+    ];
+    match selector {
+        FileSelector::Names {
+            directory, suffix, ..
+        } if directory.file_name() == Some(OsStr::new(COORDINATION_DIR)) => {
+            let escaped = literal(suffix)?;
+            if escaped.contains(',') {
+                return Ok(None);
+            }
+            Ok(Some((directory.clone(), escaped)))
+        }
+        FileSelector::Exact {
+            path,
+            directory: false,
+        } => {
+            let Some(parent) = path.parent() else {
+                return Ok(None);
+            };
+            if parent.file_name() != Some(OsStr::new(COORDINATION_DIR)) {
+                return Ok(None);
+            }
+            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                return Ok(None);
+            };
+            for &ext in COORDINATION_SUFFIXES {
+                if name.ends_with(ext) && name.len() > ext.len() {
+                    return Ok(Some((parent.to_path_buf(), ext.to_string())));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -1157,6 +1243,7 @@ mod tests {
             executable: BTreeSet::new(),
             readable_exact: BTreeSet::new(),
             writable_exact,
+            writable_raw_exact: BTreeSet::new(),
             executable_exact: BTreeSet::from([executable.clone()]),
             executable_links: BTreeSet::new(),
             allow_network: false,
@@ -1194,6 +1281,74 @@ mod tests {
             (payload.len() as u64) < 300 * 1024,
             "expected compact deduplicated 81-file policy well under 300 KiB, got {} bytes",
             payload.len()
+        );
+        let profile_text = policy
+            .apparmor_profile(
+                &format!("octopus-1000-{}", "c".repeat(64)),
+                1000,
+                UnixSocketMediation::FamilyAndType,
+            )
+            .unwrap();
+        assert!(
+            profile_text.contains(".octopus-publication/*{"),
+            "expected coalesced .octopus-publication AppArmor rules for 81-file batch"
+        );
+        assert!(
+            profile_text.len() < 40 * 1024,
+            "expected compact coalesced AppArmor profile text, got {} bytes",
+            profile_text.len()
+        );
+    }
+
+    #[test]
+    fn writable_raw_exact_grants_rwkl_without_publication_or_directory_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let db = root.join("ledger-index.sqlite");
+        let wal = root.join("ledger-index.sqlite-wal");
+        let shm = root.join("ledger-index.sqlite-shm");
+        std::fs::write(&db, b"").unwrap();
+        std::fs::write(&wal, b"").unwrap();
+        std::fs::write(&shm, b"").unwrap();
+        let executable = normalize_existing_path(PathBuf::from("/bin/sh")).unwrap();
+        let authority = ProcessAuthority::resolve(
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            vec![db.clone(), wal.clone()],
+            Vec::<PathBuf>::new(),
+            vec![executable.clone()],
+            false,
+            false,
+            false,
+            false,
+            false,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        )
+        .unwrap()
+        .with_writable_raw_exact([shm.clone()])
+        .unwrap();
+        let policy = project(&authority, &executable).unwrap();
+        let profile_text = policy
+            .apparmor_profile(
+                &format!("octopus-1000-{}", "d".repeat(64)),
+                1000,
+                UnixSocketMediation::FamilyAndType,
+            )
+            .unwrap();
+        assert!(profile_text.contains(&format!("  \"{}\" rk,\n", db.display())));
+        assert!(profile_text.contains(&format!("  \"{}\" rk,\n", wal.display())));
+        assert!(profile_text.contains(&format!("  \"{}\" rwkl,\n", shm.display())));
+        assert!(
+            !profile_text.contains(".octopus-publication"),
+            "writable_raw_exact must not generate publication coordination rules: {profile_text}"
+        );
+        assert!(
+            !policy.files.iter().any(|rule| matches!(
+                rule.access,
+                FileAccess::CreateDirectory | FileAccess::CreatePrivateDirectory
+            )),
+            "writable_raw_exact must not generate CreateDirectory rules"
         );
     }
 }

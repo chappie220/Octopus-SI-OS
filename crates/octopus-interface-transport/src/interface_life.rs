@@ -3293,16 +3293,19 @@ fn spawn_process_command_life(
         readable.extend(blobs_dir.iter().cloned());
         readable.extend(movement_metadata_dir.iter().cloned());
         let mut readable_exact = movements_path.iter().cloned().collect::<Vec<_>>();
+        let mut writable_raw_exact = Vec::new();
         if let Some(path) = &ledger_index_path {
             readable_exact.push(path.clone());
             readable_exact.push(path_with_suffix(path, "-wal"));
-            readable_exact.push(path_with_suffix(path, "-shm"));
+            // SQLite WAL-mode readers require read+write+mmap access to the ephemeral -shm
+            // shared-memory lock/index file while keeping the database and -wal strictly read-only.
+            writable_raw_exact.push(path_with_suffix(path, "-shm"));
         }
         let resolved_interface_descriptor = ctx.resolved_interface_descriptor()?;
         ctx.descriptor_snapshot = None;
         let additional = octopus_interfaces::additional_host_root_paths(&resolved_interface_descriptor, &ctx.root_slots)?;
         let (authority, authority_roots) = octopus_interfaces::expand_host_root_authority(&command_config.authority, &ctx.root_slots, &additional)?;
-        let resolved = authority.resolve(
+        let mut resolved = authority.resolve(
             &executable_base,
             &authority_roots,
             &environment,
@@ -3311,6 +3314,9 @@ fn spawn_process_command_life(
             std::iter::empty(),
             readable_exact,
         )?;
+        if !writable_raw_exact.is_empty() {
+            resolved.authority = resolved.authority.with_writable_raw_exact(writable_raw_exact)?;
+        }
         let host_io_limits = command_config.io_limits;
         host_io_limits.validate()?;
         let interface_host_slots = resolved_interface_descriptor

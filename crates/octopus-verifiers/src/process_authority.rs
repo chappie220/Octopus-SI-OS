@@ -25,6 +25,7 @@ pub struct ProcessAuthority {
     executable: BTreeSet<PathBuf>,
     readable_exact: BTreeSet<PathBuf>,
     writable_exact: BTreeSet<PathBuf>,
+    writable_raw_exact: BTreeSet<PathBuf>,
     executable_exact: BTreeSet<PathBuf>,
     executable_links: BTreeSet<PathBuf>,
     allow_network: bool,
@@ -168,6 +169,7 @@ impl ProcessAuthority {
             executable,
             readable_exact,
             writable_exact,
+            writable_raw_exact: BTreeSet::new(),
             executable_exact,
             executable_links: BTreeSet::new(),
             allow_network,
@@ -192,6 +194,18 @@ impl ProcessAuthority {
 
     pub fn writable(&self) -> &BTreeSet<PathBuf> {
         &self.writable
+    }
+
+    pub fn with_writable_raw_exact(
+        mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, String> {
+        for path in paths {
+            let normalized = normalize_declared_exact_path(path)?;
+            self.readable_exact.insert(normalized.clone());
+            self.writable_raw_exact.insert(normalized);
+        }
+        Ok(self)
     }
 
     fn with_executable_links(mut self, links: BTreeSet<PathBuf>) -> Self {
@@ -1444,6 +1458,7 @@ fn prepare_macos(
     let mut writable = authority.writable.clone();
     add_macos_lexical_aliases(&mut writable);
     let mut writable_exact = authority.writable_exact.clone();
+    writable_exact.extend(authority.writable_raw_exact.iter().cloned());
     add_macos_lexical_aliases(&mut writable_exact);
     let mut writable_ancestor_sources = writable.clone();
     writable_ancestor_sources.extend(writable_exact.iter().cloned());

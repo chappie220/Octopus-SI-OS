@@ -780,6 +780,7 @@ impl LedgerSqliteReader {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        conn.pragma_update(None, "query_only", "ON")?;
         let schema_version = required_meta_u64(&conn, "schema_version")?;
         if schema_version != SCHEMA_VERSION as u64 {
             return Err(SqliteIndexError::SchemaGeneration {
