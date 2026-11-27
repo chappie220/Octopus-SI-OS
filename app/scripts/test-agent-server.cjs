@@ -106,7 +106,7 @@ test("Agent server serves the WebUI and grants access only to authenticated same
 
   const page = await call("/");
   assert.equal(page.text, "<title>Octopus</title>");
-  assert.match(page.headers["content-security-policy"], /script-src [^;]*https:\/\/challenges\.cloudflare\.com/);
+  assert.match(page.headers["content-security-policy"], /script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https:\/\/challenges\.cloudflare\.com/);
   assert.match(page.headers["content-security-policy"], /frame-src [^;]*https:\/\/challenges\.cloudflare\.com/);
   assert.equal((await call("/outside.txt")).status, 404);
   assert.equal((await call("/%2e%2e/private.txt")).status, 404);
