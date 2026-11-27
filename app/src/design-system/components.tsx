@@ -633,7 +633,7 @@ export function OcCheckbox({
 
   return (
     <label
-      className={cx("oc-checkbox inline-flex min-w-0 cursor-interaction items-center gap-2", disabled && "cursor-not-allowed", className)}
+      className={cx("oc-checkbox inline-flex min-w-0 cursor-interaction gap-2.5", description ? "items-start" : "items-center", disabled && "cursor-not-allowed", className)}
       data-oc-control="checkbox"
       data-state={state}
     >
@@ -652,11 +652,11 @@ export function OcCheckbox({
       />
       <span
         aria-hidden="true"
-        className="oc-checkbox__control"
+        className={cx("oc-checkbox__control shrink-0", description && "mt-0.5")}
       >
         {checked === "mixed" ? <svg width="14" height="14" viewBox="0 0 20 20" fill="none" focusable="false"><path d="M3.5 10.0002C3.5 9.63297 3.79777 9.33521 4.16504 9.33521H15.835C16.2022 9.33521 16.5 9.63297 16.5 10.0002C16.5 10.3675 16.2022 10.6652 15.835 10.6652H4.16504C3.79777 10.6652 3.5 10.3675 3.5 10.0002Z" fill="currentColor" /></svg> : checked ? <Glyph name="check" size={12} /> : null}
       </span>
-      <span className={cx("min-w-0", !showLabel && "sr-only")}>
+      <span className={cx("min-w-0 flex-1 break-words", !showLabel && "sr-only")}>
         <span className="block min-w-0 text-sm font-medium text-token-text-primary" id={labelId}>{label}</span>
         {description ? <span className="mt-0.5 block min-w-0 text-xs leading-4 text-token-text-secondary" id={descriptionId}>{description}</span> : null}
       </span>
@@ -1536,7 +1536,7 @@ export function OcDialog({
               "octopus-dialog oc-dialog flex flex-col overflow-hidden outline-none",
               variant === "form"
                 ? "relative bg-surface-elevated-secondary text-default"
-                : "rounded-3xl bg-token-dropdown-background/90 text-token-foreground shadow-lg ring-[0.5px] ring-token-border backdrop-blur-xl",
+                : "rounded-3xl bg-token-dropdown-background text-token-foreground shadow-2xl ring-[0.5px] ring-token-border",
               panelClassName,
             )}
             data-oc-dialog
@@ -1603,12 +1603,12 @@ export function OcDialogFooter({ leading, children, className, ...props }: OcDia
     <footer
       {...props}
       className={cx(
-        "flex min-h-[76px] shrink-0 items-center gap-3 border-t border-token-border/40 px-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-4",
+        "oc-dialog-footer flex min-h-[76px] shrink-0 flex-wrap items-center justify-between gap-3 border-t border-token-border/40 px-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-4",
         className,
       )}
     >
       {leading ? <div className="min-w-0 flex-1 text-xs leading-4 text-token-description-foreground">{leading}</div> : <div className="flex-1" />}
-      <div className="flex shrink-0 items-center justify-end gap-2">{children}</div>
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">{children}</div>
     </footer>
   );
 }

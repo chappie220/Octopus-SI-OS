@@ -715,11 +715,11 @@ function PausedQueueSubmissionDialog({ count, onResolve }: {
   return (
     <OcDialog
       ariaLabelledBy="paused-queue-submit-title"
-      backdropClassName="octopus-dialog-overlay bg-[#00000022]"
+      backdropClassName="octopus-dialog-overlay"
       initialFocusRef={cancelRef}
       onClose={() => onResolve?.("cancel")}
       open={count > 0}
-      panelClassName="octopus-dialog w-[460px] max-w-[calc(100vw-2rem)] rounded-3xl bg-token-dropdown-background/95 p-5 text-token-foreground ring-[0.5px] ring-token-border backdrop-blur-xl"
+      panelClassName="octopus-dialog w-[460px] max-w-[calc(100vw-24px)] rounded-3xl bg-token-dropdown-background p-5 text-token-foreground ring-[0.5px] ring-token-border"
     >
       <OcDialogHeader
         className="p-0"

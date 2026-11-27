@@ -219,13 +219,25 @@
 }
 
 .oc-dialog-overlay {
-  background: #00000022;
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: var(--octopus-viewport-height, 100dvh);
+  box-sizing: border-box;
+  padding: max(12px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
+  background: rgb(15 23 42 / 48%);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  overflow: hidden;
 }
 
 .oc-dialog {
   width: 520px;
-  max-width: 92vw;
-  max-height: min(780px, calc(100vh - 48px));
+  min-width: 0;
+  max-width: calc(100vw - 24px);
+  max-height: min(780px, calc(var(--octopus-viewport-height, 100dvh) - 24px));
+  box-sizing: border-box;
+  background-color: var(--color-token-dropdown-background, light-dark(#ffffff, #1e1f23));
 }
 
 .oc-dialog[data-oc-dialog-size="narrow"] { width: 380px; }
@@ -237,11 +249,11 @@
 .oc-dialog[data-oc-dialog-size="xwide"] { width: 680px; }
 .oc-dialog[data-oc-dialog-size="xxwide"] { width: 800px; }
 .oc-dialog-overlay[data-oc-dialog-variant="form"] {
-  background: #00000080;
-  -webkit-backdrop-filter: blur(1px);
-  backdrop-filter: blur(1px);
+  background: rgb(15 23 42 / 56%);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
 }
-:root[data-theme="light"] .oc-dialog-overlay[data-oc-dialog-variant="form"] { background: #e3e3e380; }
+:root[data-theme="light"] .oc-dialog-overlay[data-oc-dialog-variant="form"] { background: rgb(15 23 42 / 42%); }
 
 .oc-dialog[data-oc-dialog-variant="form"] {
   border-radius: calc(var(--spacing) * 6 * var(--corner-radius-scale));
@@ -251,8 +263,8 @@
 .oc-dialog[data-oc-dialog-position="top"] {
   --dialog-top-content-max-height: 760px;
   position: relative;
-  top: max(10dvh, calc((100dvh - var(--dialog-top-content-max-height)) / 2));
-  max-height: min(var(--dialog-top-content-max-height), 85dvh);
+  top: max(6dvh, calc((var(--octopus-viewport-height, 100dvh) - var(--dialog-top-content-max-height)) / 2));
+  max-height: min(var(--dialog-top-content-max-height), calc(var(--octopus-viewport-height, 100dvh) - 24px));
 }
 
 .oc-dialog[data-oc-dialog-size="editor"] {
@@ -260,6 +272,31 @@
   height: 720px;
   max-width: 100%;
   max-height: 100%;
+}
+
+@media (max-width: 767px) {
+  .oc-dialog {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px);
+    max-height: calc(var(--octopus-viewport-height, 100dvh) - 24px);
+    border-radius: 20px;
+  }
+
+  .oc-dialog[data-oc-dialog-position="top"] {
+    top: 0;
+    margin-block: auto;
+    max-height: calc(var(--octopus-viewport-height, 100dvh) - 24px);
+  }
+
+  .oc-dialog-footer {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    min-height: 0;
+  }
+
+  .oc-dialog-footer > :last-child {
+    margin-left: auto;
+  }
 }
 
 .oc-surface-header {
