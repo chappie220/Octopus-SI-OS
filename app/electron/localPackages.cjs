@@ -3,6 +3,7 @@ const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const Ajv = require("ajv/dist/2020");
+const { getSettledFileSha256, setSettledFileSha256 } = require("./settledFileHashCache.cjs");
 const packageManifestSchema = require("../schemas/local_package_manifest.schema.json");
 const applicationPackSchema = require("../schemas/local_application_pack.schema.json");
 const packageReceiptSchema = require("../schemas/local_package_receipt.schema.json");
@@ -212,7 +213,7 @@ async function inspectLocalPackageDiagnostics(options) {
       const target = memberPath(roots.activeRegistryRoot, member);
       if (!await pathExists(target)) continue;
       await requirePlainDirectory(path.dirname(target), path.dirname(target));
-      active = await snapshotDirectory(target);
+      active = await snapshotDirectory(target, { cacheKey: `active\0${target}` });
     } catch {
       report.state = "unreadable";
       continue;
@@ -1829,15 +1830,20 @@ async function snapshotDirectory(rootValue, options = {}) {
     sourceSnapshotCache.set(options.cacheKey, cached);
     return cached.snapshot;
   }
+  const observedAtMs = Date.now();
+  const allowSettledFileCache = Boolean(options.cacheKey);
   for (const { path: absolute, relative_path: relative, stat } of inventory) {
-    const handle = await fs.open(absolute, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
-    let content;
-    try { content = await hashFileHandle(handle); }
-    finally { await handle.close(); }
-    const current = await fs.lstat(absolute);
-    if (content.size !== stat.size || current.size !== stat.size || current.mtimeMs !== stat.mtimeMs
-      || current.ctimeMs !== stat.ctimeMs || current.mode !== stat.mode || current.ino !== stat.ino || !current.isFile()) {
-      throw new Error(`local package file changed while reading: ${absolute}`);
+    let content = allowSettledFileCache ? getSettledFileSha256(absolute, stat, observedAtMs) : null;
+    if (!content) {
+      const handle = await fs.open(absolute, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
+      try { content = await hashFileHandle(handle); }
+      finally { await handle.close(); }
+      const current = await fs.lstat(absolute);
+      if (content.size !== stat.size || current.size !== stat.size || current.mtimeMs !== stat.mtimeMs
+        || current.ctimeMs !== stat.ctimeMs || current.mode !== stat.mode || current.ino !== stat.ino || !current.isFile()) {
+        throw new Error(`local package file changed while reading: ${absolute}`);
+      }
+      if (allowSettledFileCache) setSettledFileSha256(absolute, current, content, observedAtMs);
     }
     files.push({ path: absolute, relative_path: relative, size: stat.size, mode: stat.mode & 0o777, sha256: content.sha256 });
   }

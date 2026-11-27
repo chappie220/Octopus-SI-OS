@@ -197,3 +197,91 @@ test("indexed ledger projection serves marks, artifacts, labels, snapshot, topol
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("incremental ledger, chat index, and required artifact caches reuse memory without reopening SQLite or blobs", async () => {
+  const { blake3 } = require("@noble/hashes/blake3");
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "oct-mem-reuse-")));
+  for (const dir of ["ledger/blobs", "registry/interface/chat_iface", "state/runs", "state/ee_instances"]) {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+  }
+  await fs.writeFile(path.join(root, "registry/interface/chat_iface/interface.json"), JSON.stringify({ id: "chat_iface", interface_type: "world", role: "client" }));
+  await fs.writeFile(path.join(root, "state/runs/run-1.json"), JSON.stringify({
+    id: "run-1", ee: "ee-1", worker: "worker-1", trace: "trace-1", status: "running", active_checkpoints: [], checkpoints: [],
+  }));
+
+  const writeBlob = async (value) => {
+    const bytes = Buffer.from(JSON.stringify(value));
+    const hex = Buffer.from(blake3(bytes)).toString("hex");
+    const file = path.join(root, "ledger/blobs", hex);
+    await fs.writeFile(file, bytes);
+    return { hex, file };
+  };
+  const payload = await writeBlob({ text: "cached-required-payload" });
+  const manifest = await writeBlob({ label: "operator.message", payload_path: payload.file, payload_content_hash: payload.hex });
+  const hashBytes = [...Buffer.from(manifest.hex, "hex")];
+
+  const baseRow = {
+    seq: 0, lamport: 1, recorded_at_unix_ms: 1000, trace: "trace-1",
+    kind: "InterfaceArrival", from: { Interface: "chat_iface" }, to: { Interface: "worker-1" },
+    artifact: { id: `operator.message:${manifest.hex}`, content: hashBytes },
+    invocation_metadata: { runtime: { run: "run-1", ee: "ee-1", worker: "worker-1", checkpoint: "cp-1", interface: "chat_iface", epoch: 1 } },
+  };
+  const ledgerPath = path.join(root, "ledger/movements.jsonl");
+  const indexPath = path.join(root, "ledger/ledger-index.sqlite");
+  const firstLine = `${JSON.stringify(baseRow)}\n`;
+  await fs.writeFile(ledgerPath, firstLine, "utf8");
+  createLedgerIndex(indexPath, [{ row: baseRow, startOffset: 0, endOffset: Buffer.byteLength(firstLine, "utf8") }], Buffer.byteLength(firstLine, "utf8"));
+
+  const store = createProjectionContext({
+    resolveRepoRoot: () => root,
+    octopusHome: () => root,
+    sourceRegistry: () => path.join(root, "registry"),
+    projectEePolicies: async () => ({ environments: [], issues: [] }),
+  });
+  store.withFileProjectionPackages = async (projection) => projection;
+
+  try {
+    // Round 1: cold load from SQLite + blob
+    const snap1 = await store.readProjection({ contract_version: 1, method: "projection.runtime.snapshot", params: {} });
+    assert.equal(snap1.projection.ledger_rows, 1);
+    const chatRows1 = await store.readIndexedOperatorChatLedgerRows({ durableRoot: path.join(root, "ledger") }, new Set(["run-1"]));
+    assert.equal(chatRows1.rowsByRun.get("run-1").length, 1);
+
+    const artifactRow = chatRows1.rowsByRun.get("run-1")[0];
+    const resolved1 = await store.resolveLedgerArtifactPayloads([artifactRow], true);
+    assert.deepEqual(resolved1.get(artifactRow), { text: "cached-required-payload" });
+
+    // Remove SQLite index and blob files from disk — subsequent reads and incremental appends MUST reuse memory!
+    await fs.rm(indexPath);
+    await fs.rm(payload.file);
+    await fs.rm(manifest.file);
+
+    // Bump generation and append a new movement to movements.jsonl
+    const appendedRow = {
+      seq: 1, lamport: 2, recorded_at_unix_ms: 2000, trace: "trace-1",
+      kind: "InterfaceOutbound", from: { Interface: "worker-1" }, to: { Interface: "chat_iface" },
+      artifact: { id: `operator.reply:${manifest.hex}`, content: hashBytes },
+      invocation_metadata: { runtime: { run: "run-1", ee: "ee-1", worker: "worker-1", checkpoint: "cp-1", interface: "chat_iface", epoch: 1 } },
+    };
+    await fs.appendFile(ledgerPath, `${JSON.stringify(appendedRow)}\n`, "utf8");
+    store.signalLedgerProjectionChange();
+
+    const snap2 = await store.readProjection({ contract_version: 1, method: "projection.runtime.snapshot", params: {} });
+    assert.equal(snap2.projection.ledger_rows, 2);
+    assert.equal(snap2.projection.latest_movement_seq, 1);
+
+    const chatRows2 = await store.readIndexedOperatorChatLedgerRows({ durableRoot: path.join(root, "ledger") }, new Set(["run-1"]));
+    assert.equal(chatRows2.rowsByRun.get("run-1").length, 2);
+    assert.equal(chatRows2.nextMovementSeq, 1);
+
+    const delta = await store.readIndexedOperatorChatLedgerDelta({ durableRoot: path.join(root, "ledger") }, new Set(["run-1"]), 0);
+    assert.equal(delta.rowsByRun.get("run-1").length, 1);
+    assert.equal(delta.rowsByRun.get("run-1")[0].seq, 1);
+
+    const resolved2 = await store.resolveLedgerArtifactPayloads([artifactRow], true);
+    assert.deepEqual(resolved2.get(artifactRow), { text: "cached-required-payload" });
+  } finally {
+    store.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

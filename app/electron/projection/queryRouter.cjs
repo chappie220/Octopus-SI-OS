@@ -23,7 +23,7 @@ function queryRouterProjection(store) {
     if (method === "projection.operator.providers.list") {
       const home = store.octopusHome();
       store.ensureProjectionWatchers();
-      const providers = await readProviderInterfaceDescriptors(path.join(home, "registry"));
+      const providers = await store.cachedProviderInterfaceDescriptors(path.join(home, "registry"));
       if (home !== store.octopusHome()) throw new Error("Provider catalogue Home changed during read");
       return { providers };
     }

@@ -8,6 +8,36 @@ const { rowTimeMs } = require("./values.cjs");
 
 const CACHE_VERSION = 2;
 const CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const MEMORY_PREVIEW_CACHE_MAX = 2_048;
+const MEMORY_TURN_CACHE_MAX = 1_024;
+
+function lruGet(cache, key) {
+  if (!cache || !cache.has(key)) return undefined;
+  const value = cache.get(key);
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function lruSet(cache, key, value, maxEntries) {
+  if (!cache) return;
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxEntries) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function cloneTurnState(state) {
+  return {
+    ...state,
+    pendingInputs: [...(state.pendingInputs ?? [])],
+    nativeTurns: new Map(state.nativeTurns ?? []),
+    recordedInputs: new Map([...(state.recordedInputs ?? [])].map(([key, ids]) => [key, new Set(ids)])),
+  };
+}
 
 function digest(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -51,25 +81,35 @@ async function writeCache(file, value, warn) {
   }
 }
 
-async function cachedOperatorChatArtifactText({ home, entry, row, protocol, direction, limit, resolve, warnings }) {
+async function cachedOperatorChatArtifactText({ home, entry, row, protocol, direction, limit, resolve, warnings, memoryCache = null }) {
   const textOf = (payload) => operatorChatTurnText(payload, direction).replace(/\s+/g, " ").trim().slice(0, limit);
   if (row.source_file !== path.join(home, "ledger", "movements.jsonl")) return textOf(await resolve(row));
   const basis = digest([row.source_file, row.artifact, protocol.artifactReadProjection, direction, limit]);
   const file = path.join(home, "client", "projection-cache", "previews", `${digest([entry.runId, entry.chatInterfaceId, direction, limit])}.json`);
+  const inMemory = lruGet(memoryCache, file);
+  if (inMemory?.basis === basis && typeof inMemory.text === "string") {
+    return inMemory.text;
+  }
   const warn = (error) => warnings?.push(`Task preview cache: ${String(error?.message ?? error)}`);
   const cached = await readCache(file, warn);
   if (cached?.basis === basis && typeof cached.text === "string") {
     try {
-      if (await verifiedArtifactFilesUnchanged(cached.files, path.join(home, "ledger", "blobs"))) return cached.text;
+      if (await verifiedArtifactFilesUnchanged(cached.files, path.join(home, "ledger", "blobs"))) {
+        lruSet(memoryCache, file, { basis, text: cached.text }, MEMORY_PREVIEW_CACHE_MAX);
+        return cached.text;
+      }
     } catch (error) { warn(error); }
   }
   let files;
   const text = textOf(await resolve(row, (verified) => { files = verified; }));
-  if (files?.length) await writeCache(file, { basis, files, text }, warn);
+  if (files?.length) {
+    lruSet(memoryCache, file, { basis, text }, MEMORY_PREVIEW_CACHE_MAX);
+    await writeCache(file, { basis, files, text }, warn);
+  }
   return text;
 }
 
-async function cachedOperatorChatTurnState({ projection, entry, protocol, reduce, resolve }) {
+async function cachedOperatorChatTurnState({ projection, entry, protocol, reduce, resolve, memoryCache = null }) {
   const initial = { open: false, state: "idle", lastMovementSeq: -1, updatedAtMs: 0 };
   const rows = [...entry.activity].sort((left, right) => left.seq - right.seq);
   const ledgerPath = path.join(projection.octopusHome, "ledger", "movements.jsonl");
@@ -85,20 +125,31 @@ async function cachedOperatorChatTurnState({ projection, entry, protocol, reduce
   const file = path.join(directory, `${digest([entry.runId, entry.chatInterfaceId])}.json`);
   const warn = (error) => projection.warnings?.push(`Task status cache ${entry.runId}: ${String(error?.message ?? error)}`);
   let checkpoint;
-  const value = await readCache(file, warn);
-  try {
-    if (value?.basis === basis
-      && Number.isSafeInteger(value.count) && value.count > 0 && value.count <= rows.length
-      && value.rowsDigest === rowDigest(rows, value.count)
-      && value.state.lastMovementSeq === rows[value.count - 1].seq
-      && typeof value.state.open === "boolean" && ["idle", "waiting", "working", "failed"].includes(value.state.state)
-      && await verifiedArtifactFilesUnchanged(value.files, path.join(projection.octopusHome, "ledger", "blobs"))) {
-      const state = { ...value.state, nativeTurns: new Map(value.state.nativeTurns),
-        recordedInputs: new Map(value.state.recordedInputs.map(([key, ids]) => [key, new Set(ids)])) };
-      checkpoint = { ...value, state };
+  const inMemory = lruGet(memoryCache, file);
+  if (inMemory?.basis === basis
+    && Number.isSafeInteger(inMemory.count) && inMemory.count > 0 && inMemory.count <= rows.length
+    && inMemory.state.lastMovementSeq === rows[inMemory.count - 1].seq
+    && inMemory.rowsDigest === rowDigest(rows, inMemory.count)) {
+    if (inMemory.count === rows.length) return cloneTurnState(inMemory.state);
+    checkpoint = { ...inMemory, state: cloneTurnState(inMemory.state) };
+  }
+  if (!checkpoint) {
+    const value = await readCache(file, warn);
+    try {
+      if (value?.basis === basis
+        && Number.isSafeInteger(value.count) && value.count > 0 && value.count <= rows.length
+        && value.rowsDigest === rowDigest(rows, value.count)
+        && value.state.lastMovementSeq === rows[value.count - 1].seq
+        && typeof value.state.open === "boolean" && ["idle", "waiting", "working", "failed"].includes(value.state.state)
+        && await verifiedArtifactFilesUnchanged(value.files, path.join(projection.octopusHome, "ledger", "blobs"))) {
+        const state = { ...value.state, nativeTurns: new Map(value.state.nativeTurns),
+          recordedInputs: new Map(value.state.recordedInputs.map(([key, ids]) => [key, new Set(ids)])) };
+        checkpoint = { ...value, state };
+        lruSet(memoryCache, file, { basis, count: value.count, rowsDigest: value.rowsDigest, files: value.files, state: cloneTurnState(state) }, MEMORY_TURN_CACHE_MAX);
+      }
+    } catch (error) {
+      warn(error);
     }
-  } catch (error) {
-    warn(error);
   }
   if (checkpoint?.count === rows.length) return checkpoint.state;
   const files = new Map((checkpoint?.files ?? []).map(file => [file.path, file]));
@@ -118,7 +169,10 @@ async function cachedOperatorChatTurnState({ projection, entry, protocol, reduce
     return payload;
   });
   if (!cacheable) return state;
-  const next = { basis, count: rows.length, rowsDigest: rowDigest(rows, rows.length), files: [...files.values()],
+  const rowsDigestValue = rowDigest(rows, rows.length);
+  const fileValues = [...files.values()];
+  lruSet(memoryCache, file, { basis, count: rows.length, rowsDigest: rowsDigestValue, files: fileValues, state: cloneTurnState(state) }, MEMORY_TURN_CACHE_MAX);
+  const next = { basis, count: rows.length, rowsDigest: rowsDigestValue, files: fileValues,
     state: { ...state, nativeTurns: [...state.nativeTurns], recordedInputs: [...state.recordedInputs].map(([key, ids]) => [key, [...ids]]) } };
   await writeCache(file, next, warn);
   return state;

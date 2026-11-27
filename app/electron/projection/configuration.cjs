@@ -26,6 +26,26 @@ function configurationProjection(store) {
   let applicationOwners = null;
   const runRecordCache = new Map();
   const packageProjectionStates = new WeakMap();
+  const providerDescriptorsCache = new Map();
+
+  async function cachedProviderInterfaceDescriptors(registryRoot) {
+    for (;;) {
+      const generation = configurationProjectionGeneration;
+      let build = providerDescriptorsCache.get(registryRoot);
+      if (!build || build.generation !== generation) {
+        build = { generation, promise: readProviderInterfaceDescriptors(registryRoot) };
+        providerDescriptorsCache.set(registryRoot, build);
+      }
+      try {
+        const providers = await build.promise;
+        if (build.generation === configurationProjectionGeneration) return structuredClone(providers);
+      } catch (error) {
+        if (providerDescriptorsCache.get(registryRoot) === build) providerDescriptorsCache.delete(registryRoot);
+        if (build.generation === configurationProjectionGeneration) throw error;
+      }
+      if (providerDescriptorsCache.get(registryRoot) === build) providerDescriptorsCache.delete(registryRoot);
+    }
+  }
 
   async function cachedPackageCatalog(repoRoot) {
     const scope = store.fileProjectionScope(repoRoot);
@@ -279,8 +299,8 @@ function configurationProjection(store) {
     if (applicationRead.status === "rejected") throw applicationRead.reason;
     const localPackages = packageRead.value;
     const applicationPackages = applicationRead.value.catalog;
-    const setupSourceProviders = await readProviderInterfaceDescriptors(configuration.localPackageRegistryRoot);
-    const setupInstalledProviders = await readProviderInterfaceDescriptors(configuration.registryRoot);
+    const setupSourceProviders = await cachedProviderInterfaceDescriptors(configuration.localPackageRegistryRoot);
+    const setupInstalledProviders = await cachedProviderInterfaceDescriptors(configuration.registryRoot);
     const applicationMetadataForProvider = (providerId, installed) => {
       const primary = installed ? applicationPackages.active : applicationPackages.sources;
       const fallback = installed ? applicationPackages.sources : applicationPackages.active;
@@ -430,7 +450,10 @@ function configurationProjection(store) {
   }
 
   function invalidateConfigurationProjection(configurationChanged, policyChanged, filename) {
-    if (configurationChanged) configurationProjectionGeneration += 1;
+    if (configurationChanged) {
+      configurationProjectionGeneration += 1;
+      providerDescriptorsCache.clear();
+    }
     if (configurationChanged && packageInputsChanged(filename)) packageCatalogGeneration += 1;
     if (configurationChanged && applicationInputsChanged(filename)) applicationCatalogGeneration += 1;
     if (policyChanged) policyProjectionGeneration += 1;
@@ -445,7 +468,8 @@ function configurationProjection(store) {
     applicationOwners = null;
     applicationOwnerScope = null;
     runRecordCache.clear();
+    providerDescriptorsCache.clear();
   }
 
-  return { buildConfigurationProjection, buildFileProjection, cachedConfigurationProjection, cachedEePolicyProjection, closeConfigurationProjection, invalidateConfigurationProjection, withFileProjectionPackages };
+  return { buildConfigurationProjection, buildFileProjection, cachedConfigurationProjection, cachedEePolicyProjection, cachedProviderInterfaceDescriptors, closeConfigurationProjection, invalidateConfigurationProjection, withFileProjectionPackages };
 }

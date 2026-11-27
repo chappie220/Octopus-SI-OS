@@ -233,27 +233,33 @@ function ledgerProjection(store) {
 
 
   async function resolveLedgerArtifactPayload(row, readOptions = {}) {
+    const required = readOptions.required === true;
     const hex = contentHashHex(row && row.artifact && row.artifact.content);
-    if (!hex || !row.source_file) return null;
+    if (!hex || !row.source_file) {
+      if (required) throw new Error(`Activity has no readable artifact receipt: ${ledgerArtifactId(row)}`);
+      return null;
+    }
     const contract = Object.hasOwn(readOptions, "projection")
       ? artifactReadProjectionForLabel(readOptions.projection, ledgerArtifactLabel(row)) : null;
     const cacheKey = `${row.source_file}:${hex}:${contract ? JSON.stringify([contract, ledgerArtifactId(row)]) : "raw"}`;
     const cached = resolvedArtifactPayloads.get(cacheKey);
     if (cached) {
-      await cached.promise;
+      const value = await cached.promise;
       if (readOptions.onVerifiedFiles && cached.files
         && !await verifiedArtifactFilesUnchanged(cached.files, path.join(path.dirname(row.source_file), "blobs"))) {
         removeResolvedArtifactPayload(cacheKey, cached);
-      } else {
+      } else if (!required || value !== null) {
         if (resolvedArtifactPayloads.get(cacheKey) === cached) {
           resolvedArtifactPayloads.delete(cacheKey);
           resolvedArtifactPayloads.set(cacheKey, cached);
         }
         return observedPayload(cached, readOptions);
+      } else {
+        removeResolvedArtifactPayload(cacheKey, cached);
       }
     }
     const entry = { promise: null, weight: 0, files: null };
-    const pending = loadLedgerArtifactPayload(row, hex, false, contract).then(({ payload, cacheable, retainedBytes, files }) => {
+    const pending = loadLedgerArtifactPayload(row, hex, required, contract).then(({ payload, cacheable, retainedBytes, files }) => {
       entry.files = cacheable ? files : null;
       if (!cacheable) {
         removeResolvedArtifactPayload(cacheKey, entry);
@@ -315,13 +321,7 @@ function ledgerProjection(store) {
         next += 1;
         if (index >= unique.length) return;
         const row = unique[index];
-        if (required) {
-          const hash = contentHashHex(row?.artifact?.content);
-          if (!hash || !row.source_file) throw new Error(`Activity has no readable artifact receipt: ${ledgerArtifactId(row)}`);
-          const contract = Object.hasOwn(readOptions, "projection")
-            ? artifactReadProjectionForLabel(readOptions.projection, ledgerArtifactLabel(row)) : null;
-          payloads.set(row, (await loadLedgerArtifactPayload(row, hash, true, contract)).payload);
-        } else payloads.set(row, await resolveLedgerArtifactPayload(row, readOptions));
+        payloads.set(row, await resolveLedgerArtifactPayload(row, required ? { ...readOptions, required: true } : readOptions));
       }
     });
     await Promise.all(workers);

@@ -66,6 +66,8 @@ function createProjectionContext(options) {
     nativeBrowserDownloadsForProjection,
     runtimeLaunchEnvironment,
     localPackagePublication,
+    operatorChatPreviewCache: new Map(),
+    operatorChatTurnMemoryCache: new Map(),
   };
   for (const projection of [invalidationProjection, queryRouterProjection, movementPagesProjection, clientSurfacesProjection, interfaceArtifactsProjection, runActivityProjection, configurationProjection, workerEnvironmentsProjection, descriptorRowsProjection, ledgerProjection, indexedLedgerProjection, operatorChatIndexProjection, operatorOsProjection, operatorChatContextProjection, operatorChatTurnsProjection, operatorChatListProjection, operatorChatMessagesProjection, scheduledInterfacesProjection, topologyRowsProjection]) {
     Object.assign(store, projection(store));
@@ -74,6 +76,10 @@ function createProjectionContext(options) {
     store.closeProjectionWatchers();
     store.closeConfigurationProjection();
     store.closeLedgerProjection();
+    store.closeIndexedLedgerProjection?.();
+    store.closeOperatorChatIndexProjection?.();
+    store.operatorChatPreviewCache.clear();
+    store.operatorChatTurnMemoryCache.clear();
   };
   return store;
 }
