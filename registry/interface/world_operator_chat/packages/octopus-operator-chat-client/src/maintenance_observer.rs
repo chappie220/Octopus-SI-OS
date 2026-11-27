@@ -145,9 +145,13 @@ pub fn plan_maintenance_observer(
     let source_provider_path = interface_root
         .join(&request.source_provider_interface_id)
         .join("interface.json");
-    let source_descriptor: InterfaceDescriptor =
+    let mut source_descriptor: InterfaceDescriptor =
         parse_strict(&planned_bytes(source_writes, &source_provider_path)?)
             .map_err(|e| e.to_string())?;
+    if let Some(base_id) = source_descriptor.copy_of.clone() {
+        let base_descriptor = load_interface_descriptor(&interface_root, base_id.as_str())?;
+        source_descriptor.inherit_driver_config_from(&base_descriptor);
+    }
     if source_descriptor.id.as_str() != request.source_provider_interface_id {
         return Err("source provider descriptor differs from the selected exact binding".into());
     }
