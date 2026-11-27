@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
@@ -1034,17 +1034,21 @@ pub fn resolve_spawn_life_config(
     registry_root: &Path,
     interface: &InterfaceId,
 ) -> Result<Option<ResolvedSpawnLifeConfig>, String> {
-    resolve_spawn_life_config_with_verification(
-        registry_root,
-        interface,
-        &mut ImportedExecutableVerification::default(),
-    )
+    resolve_spawn_life_config_inner(registry_root, interface, None)
 }
 
 pub(crate) fn resolve_spawn_life_config_with_verification(
     registry_root: &Path,
     interface: &InterfaceId,
     verification: &mut ImportedExecutableVerification,
+) -> Result<Option<ResolvedSpawnLifeConfig>, String> {
+    resolve_spawn_life_config_inner(registry_root, interface, Some(verification))
+}
+
+fn resolve_spawn_life_config_inner(
+    registry_root: &Path,
+    interface: &InterfaceId,
+    verification: Option<&mut ImportedExecutableVerification>,
 ) -> Result<Option<ResolvedSpawnLifeConfig>, String> {
     let Some(loaded) = load_spawn_life_config(registry_root, interface)? else {
         return Ok(None);
@@ -1073,7 +1077,7 @@ pub(crate) fn resolve_spawn_life_config_with_verification(
         registry_root,
         &loaded.config,
         ImportedDependencyFingerprint::Content,
-        Some(verification),
+        verification,
     )?;
     Ok(Some(ResolvedSpawnLifeConfig {
         config: loaded.config,
@@ -1357,7 +1361,7 @@ fn append_path_metadata_fingerprint(
         append_fingerprint_part(material, "file-state", &value.to_le_bytes());
     }
     if read_unsettled && !FileStamp::of(&metadata).is_settled(observed) {
-        let digest = ImportedExecutableVerification::default().digest(path, &metadata)?;
+        let digest = shared_executable_digest(path, &metadata)?;
         append_fingerprint_part(material, "unsettled-content", digest.sha256.as_bytes());
     }
     Ok(())
@@ -1378,7 +1382,7 @@ fn append_life_repository_file_fingerprints(
     for declared in life_repository_files(config) {
         let path = resolve_life_file(&declared, registry_root, interface, repository_root)?;
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-        let digest = ImportedExecutableVerification::default().digest(&path, &metadata)?;
+        let digest = shared_executable_digest(&path, &metadata)?;
         append_fingerprint_part(
             material,
             &format!("repository-file/{declared}"),
@@ -1458,7 +1462,7 @@ fn append_owner_life_dependencies(
         append_path_metadata_fingerprint(material, &declared, &file, !content)?;
         if content {
             let metadata = std::fs::symlink_metadata(&file).map_err(|error| error.to_string())?;
-            let digest = ImportedExecutableVerification::default().digest(&file, &metadata)?;
+            let digest = shared_executable_digest(&file, &metadata)?;
             append_fingerprint_part(material, declared, digest.sha256.as_bytes());
         }
     }
@@ -1635,6 +1639,25 @@ impl ImportedExecutableVerification {
     }
 }
 
+fn shared_executable_verification() -> &'static Mutex<ImportedExecutableVerification> {
+    static SHARED: OnceLock<Mutex<ImportedExecutableVerification>> = OnceLock::new();
+    SHARED.get_or_init(|| Mutex::new(ImportedExecutableVerification::default()))
+}
+
+fn shared_executable_digest(
+    path: &Path,
+    expected: &std::fs::Metadata,
+) -> Result<ExecutableDigest, String> {
+    let mut cache = shared_executable_verification()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    if cache.digests.len() >= 1024 && !cache.digests.contains_key(path) {
+        cache.digests.clear();
+    }
+    cache.digest(path, expected)
+}
+
 fn parse_imported_executable_reference(
     declared_program: &str,
 ) -> Result<Option<(InterfaceId, PathBuf)>, String> {
@@ -1802,9 +1825,10 @@ fn resolve_imported_executable_dependency(
                     build_receipt_path.display()
                 ));
             }
-            let mut local_verification = ImportedExecutableVerification::default();
-            let digest = verification.unwrap_or(&mut local_verification)
-                .digest(&canonical_executable, &executable_metadata)?;
+            let digest = match verification {
+                Some(cache) => cache.digest(&canonical_executable, &executable_metadata)?,
+                None => shared_executable_digest(&canonical_executable, &executable_metadata)?,
+            };
             if receipt.executable_bytes != executable_metadata.len()
                 || receipt.executable_bytes != digest.bytes
             {
@@ -1862,15 +1886,13 @@ fn append_imported_life_dependency_fingerprints(
     registry_root: &Path,
     config: &SpawnLifeConfig,
     fingerprint: ImportedDependencyFingerprint,
-    verification: Option<&mut ImportedExecutableVerification>,
+    mut verification: Option<&mut ImportedExecutableVerification>,
 ) -> Result<(), String> {
-    let mut local_verification = ImportedExecutableVerification::default();
-    let verification = verification.unwrap_or(&mut local_verification);
     for declared in imported_executable_declarations(config) {
         let dependency = resolve_imported_executable_dependency(
             registry_root,
             &declared,
-            Some(&mut *verification),
+            verification.as_deref_mut(),
         )?
         .ok_or_else(|| format!("imported executable declaration '{declared}' is invalid"))?;
         let prefix = format!("interface-import/{}", dependency.source_interface);
@@ -1890,7 +1912,10 @@ fn append_imported_life_dependency_fingerprints(
                     None => {
                         let metadata = std::fs::symlink_metadata(&dependency.executable_path)
                             .map_err(|error| error.to_string())?;
-                        verification.digest(&dependency.executable_path, &metadata)?
+                        match verification.as_deref_mut() {
+                            Some(cache) => cache.digest(&dependency.executable_path, &metadata)?,
+                            None => shared_executable_digest(&dependency.executable_path, &metadata)?,
+                        }
                     }
                 };
                 append_fingerprint_part(material, &executable_name, digest.sha256.as_bytes());
