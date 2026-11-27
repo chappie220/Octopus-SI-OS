@@ -52,8 +52,9 @@ function movementPagesProjection(store) {
       if (beforeSeq !== null && afterSeq !== null && beforeSeq <= afterSeq) {
         throw new Error("movement cursor before_seq must be greater than after_seq");
       }
+      const upperSeq = Math.min(beforeSeq ?? index.watermark, index.watermark);
       const predicates = ["seq < ?"];
-      const values = [Math.min(beforeSeq ?? index.watermark, index.watermark)];
+      const values = [upperSeq];
       if (afterSeq !== null) {
         predicates.push("seq > ?");
         values.push(afterSeq);
@@ -95,9 +96,12 @@ function movementPagesProjection(store) {
       const indexedRows = index.database.prepare(select)
         .all(...values, limit)
         .map((row) => normalizeIndexedProjectionMovement(row, index.ledgerPath));
-      const indexedCount = indexedUnsignedInteger(index.database.prepare(
-        `SELECT COUNT(*) AS count FROM movements WHERE ${where}`,
-      ).get(...values)?.count);
+      const seqRangeOnly = recordedAfter === null && recordedBefore === null && kinds.length === 0 && !query;
+      const indexedCount = seqRangeOnly
+        ? Math.max(0, upperSeq - (afterSeq === null ? 0 : afterSeq + 1))
+        : indexedUnsignedInteger(index.database.prepare(
+          `SELECT COUNT(*) AS count FROM movements WHERE ${where}`,
+        ).get(...values)?.count);
       if (indexedCount === null) return null;
       const tail = await readMovementLedgerTailPage(index.ledgerPath, index.durableEndOffset, index.watermark, {
         afterSeq,

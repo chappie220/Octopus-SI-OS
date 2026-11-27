@@ -193,6 +193,7 @@ function operatorChatTurnsProjection(store) {
 
   async function operatorChatTurnState(projection, entry, protocol) {
     const state = await cachedOperatorChatTurnState({ projection, entry, protocol,
+      memoryCache: store.operatorChatTurnMemoryCache,
       reduce: (initial, rows, readPayload) => reduceOperatorChatTurnState(initial, rows, entry, protocol, readPayload),
       resolve: (row, onVerifiedFiles) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection, onVerifiedFiles }),
     });

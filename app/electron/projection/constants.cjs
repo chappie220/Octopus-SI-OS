@@ -51,21 +51,10 @@ const INTERFACE_PRIVATE_RESERVED_ENV = new Set([
   "TMPDIR",
 ]);
 
-const FULL_LEDGER_PROJECTION_METHODS = new Set([
-  "projection.runtime.topology",
-  "projection.runtime.snapshot",
-  "projection.ee_instances.list",
-  "projection.runs.list",
-  "projection.runs.checkpoints.list",
-  "projection.runs.get",
-  "projection.trace.recent",
-  "projection.artifacts.list",
-  "projection.marks.list",
-  "projection.envelopes.list",
-  "projection.interfaces.pending.list",
-  "projection.descriptors.artifact_labels.list",
-  "projection.movements.list",
-]);
+// All ledger-reading projection methods now prefer bounded-memory SQLite index
+// queries (falling back to refreshLedgerProjection only when no validated index
+// exists), so none eagerly materialize the full movements.jsonl into V8 heap.
+const FULL_LEDGER_PROJECTION_METHODS = new Set([]);
 
 const scheduleEditTails = new Map();
 
@@ -79,7 +68,7 @@ const ARTIFACT_PREVIEW_MAX_BYTES = 40 * 1024 * 1024;
 
 const ARTIFACT_PAYLOAD_READ_CONCURRENCY = 8;
 
-const RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_ENTRIES = 512;
+const RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_ENTRIES = 2_048;
 
 const RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 

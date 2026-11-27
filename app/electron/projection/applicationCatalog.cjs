@@ -4,6 +4,7 @@ const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const path = require("node:path");
+const { getSettledFileSha256, setSettledFileSha256 } = require("../settledFileHashCache.cjs");
 const { readOptionalRegularJsonDocument, readRegularJsonDocument, requirePlainDirectory, stableJson } = require("./jsonFiles.cjs");
 const { readApplicationLogoAsset } = require("./privateConfiguration.cjs");
 const { parseApplicationManifest } = require("./sidecars.cjs");
@@ -203,21 +204,27 @@ async function snapshotApplicationPackageDirectory(interfaceRoot, interfaceId, s
       files: cached.snapshot.files.map((file) => ({ ...file })),
     };
   }
+  const observedAtMs = Date.now();
+  const allowSettledFileCache = !options.fresh;
   for (const { relative_path: relativePath, path: entryPath, stat: before } of inventory) {
-    const content = await hashApplicationFile(entryPath);
-    const after = await fs.lstat(entryPath);
-    if (
-      after.isSymbolicLink()
-      || !after.isFile()
-      || content.size !== before.size
-      || before.dev !== after.dev
-      || before.ino !== after.ino
-      || before.size !== after.size
-      || before.mode !== after.mode
-      || before.mtimeMs !== after.mtimeMs
-      || before.ctimeMs !== after.ctimeMs
-    ) {
-      throw new Error(`${sourceKind} application package changed while it was inspected: ${entryPath}`);
+    let content = allowSettledFileCache ? getSettledFileSha256(entryPath, before, observedAtMs) : null;
+    if (!content) {
+      content = await hashApplicationFile(entryPath);
+      const after = await fs.lstat(entryPath);
+      if (
+        after.isSymbolicLink()
+        || !after.isFile()
+        || content.size !== before.size
+        || before.dev !== after.dev
+        || before.ino !== after.ino
+        || before.size !== after.size
+        || before.mode !== after.mode
+        || before.mtimeMs !== after.mtimeMs
+        || before.ctimeMs !== after.ctimeMs
+      ) {
+        throw new Error(`${sourceKind} application package changed while it was inspected: ${entryPath}`);
+      }
+      if (allowSettledFileCache) setSettledFileSha256(entryPath, after, content, observedAtMs);
     }
     files.push({
       relative_path: relativePath,

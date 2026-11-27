@@ -8,12 +8,28 @@ const { appendOperatorChatAssistantMessage, nativeTurnRecordedInputs, operatorCh
 const { baseInterfaceRows } = require("./registryRows.cjs");
 const { arrayValue, contentHashHex, ledgerArtifactId, ledgerArtifactLabel, numberValue, objectOrEmpty, rowTimeMs, stringValue } = require("./values.cjs");
 
+const OPERATOR_CHAT_MESSAGES_CACHE_MAX_ENTRIES = 32;
+
 function operatorChatMessagesProjection(store) {
   async function operatorChatMessages(projection, runId) {
+    const generation = store.projectionGeneration;
     const cached = projection.operatorChatMessagesCache.get(runId);
-    if (cached?.generation === store.projectionGeneration) return readAssistantTextEdits(store.octopusHome(), runId, await cached.promise);
+    if (cached?.generation === generation) {
+      projection.operatorChatMessagesCache.delete(runId);
+      projection.operatorChatMessagesCache.set(runId, cached);
+      return readAssistantTextEdits(store.octopusHome(), runId, await cached.promise);
+    }
+    for (const [existingRunId, entry] of projection.operatorChatMessagesCache) {
+      if (entry.generation !== generation) projection.operatorChatMessagesCache.delete(existingRunId);
+    }
     const promise = buildOperatorChatMessages(projection, runId);
-    projection.operatorChatMessagesCache.set(runId, { generation: store.projectionGeneration, promise });
+    projection.operatorChatMessagesCache.delete(runId);
+    projection.operatorChatMessagesCache.set(runId, { generation, promise });
+    while (projection.operatorChatMessagesCache.size > OPERATOR_CHAT_MESSAGES_CACHE_MAX_ENTRIES) {
+      const oldest = projection.operatorChatMessagesCache.keys().next().value;
+      if (oldest === undefined || oldest === runId) break;
+      projection.operatorChatMessagesCache.delete(oldest);
+    }
     promise.catch(() => {
       if (projection.operatorChatMessagesCache.get(runId)?.promise === promise) {
         projection.operatorChatMessagesCache.delete(runId);

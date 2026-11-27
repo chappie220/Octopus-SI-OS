@@ -7,7 +7,8 @@ const { arrayValue, dedupeRows, filterByString, groupRowsBy, isAdmittedInterface
 function topologyRowsProjection(store) {
   function cachedTopologySnapshot(projection, params) {
     const key = JSON.stringify([
-      projection.generation,
+      store.projectionGeneration,
+      Boolean(projection.ledgerRevision),
       params.include_ledger !== false,
       [...new Set(arrayValue(params.focused_run_ids).map(stringValue).filter(Boolean))].sort(),
     ]);
@@ -23,6 +24,13 @@ function topologyRowsProjection(store) {
 
   async function topologySnapshot(projection, params) {
     const includeLedger = params.include_ledger !== false;
+    if (includeLedger) {
+      const indexedSnapshot = await store.readIndexedProjectionSnapshot(projection);
+      if (indexedSnapshot) {
+        return indexedTopologySnapshot(projection, params, indexedSnapshot);
+      }
+      await store.refreshLedgerProjection(projection);
+    }
     const runs = limitRows(runRows(projection, includeLedger), { limit: 1_000 });
     const outcomeIndex = includeLedger ? requiredVerifiedArtifactOutcomeIndex(projection) : new Map();
     const recordByRun = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
@@ -84,6 +92,85 @@ function topologyRowsProjection(store) {
       workerEnvironmentsRaw: { worker_environments: limitRows(workerEnvironmentRows(projection), { limit: 1_000 }) },
       movementsRaw: includeLedger
         ? { movements: (await recentMovementRows(projection, 1_000)).map(withoutRawProjectionEvidence), total: projection.ledgerRows.length }
+        : { movements: [], total: 0 },
+      runDetailsRaw: runDetails,
+    };
+  }
+
+  async function indexedTopologySnapshot(projection, params, snapshotRaw) {
+    const [
+      allRuns,
+      eeInstances,
+      outcomeIndex,
+      allArtifacts,
+      allMarks,
+      workerEnvs,
+      recentMovements,
+    ] = await Promise.all([
+      store.readIndexedRunRows(projection),
+      store.readIndexedEeInstanceRows(projection),
+      store.readIndexedOutcomeIndex(projection),
+      store.readIndexedArtifactRows(projection),
+      store.readIndexedMarkRows(projection),
+      store.readIndexedWorkerEnvironmentRows(projection),
+      store.readIndexedRecentMovementRows(projection, 1_000),
+    ]);
+    const runs = limitRows(allRuns ?? runRows(projection, false), { limit: 1_000 });
+    const resolvedOutcomes = outcomeIndex ?? new Map();
+    const recordByRun = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
+    const bindings = bindingRows(projection);
+    const artifacts = allArtifacts.map(topologyArtifactRow);
+    const marks = allMarks.map(withoutRawProjectionEvidence);
+    const bindingsByRun = groupRowsBy(bindings, "run_id");
+    const artifactsByRun = groupRowsBy(artifacts, "run_id");
+    const marksByRun = groupRowsBy(marks, "run_id");
+    const allWorkerEnvironments = workerEnvs ?? workerEnvironmentRows(projection);
+    const requestedRunIds = new Set(arrayValue(params.focused_run_ids).map(stringValue).filter(Boolean));
+    for (const run of runs.slice(0, 12)) requestedRunIds.add(stringValue(run.run_id));
+    const envelopesByRun = (await store.readIndexedEnvelopesForRuns(projection, requestedRunIds, 80)) ?? new Map();
+    const runDetails = {};
+    for (const runId of requestedRunIds) {
+      const run = runs.find((row) => stringValue(row.run_id) === runId);
+      if (!run) continue;
+      const workerEnvironments = allWorkerEnvironments.filter((row) => stringValue(row.run_id) === runId);
+      const checkpoints = recordCheckpointRowsFor(projection, runId, resolvedOutcomes, recordByRun)
+        ?? (await store.readIndexedRunCheckpointRows(projection, runId))
+        ?? [];
+      runDetails[runId] = {
+        detail: {
+          run,
+          bindings: bindingsByRun.get(runId) ?? [],
+          artifacts: artifactsByRun.get(runId) ?? [],
+          marks: marksByRun.get(runId) ?? [],
+          checkpoints,
+          worker_environments: workerEnvironments,
+          ...(workerEnvironments.length === 1 ? { worker_environment: workerEnvironments[0] } : {}),
+        },
+        trace: { events: limitRows(envelopesByRun.get(runId) ?? [], { limit: 80 }) },
+      };
+    }
+    const runCheckpoints = await Promise.all(runs.map(async (run) => {
+      const runId = stringValue(run.run_id);
+      return {
+        run_id: runId,
+        checkpoints: recordCheckpointRowsFor(projection, runId, resolvedOutcomes, recordByRun)
+          ?? (await store.readIndexedRunCheckpointRows(projection, runId))
+          ?? [],
+      };
+    }));
+    return {
+      generation: store.projectionGeneration,
+      snapshotRaw,
+      eeRaw: { ee_instances: limitRows(eeInstances ?? eeInstanceRows(projection, false), { limit: 300 }) },
+      runsRaw: { runs, invalid_run_records: projection.invalidRunRecords },
+      runCheckpointsRaw: { run_checkpoints: runCheckpoints },
+      interfacesRaw: { interfaces: interfaceRows(projection) },
+      bindingsRaw: { bindings: bindings.filter((row) => stringValue(row.status) === "projected") },
+      artifactsRaw: { artifacts: limitRows(artifacts, { limit: 300 }) },
+      marksRaw: { marks: limitRows(marks, { limit: 300 }) },
+      workerEnvironmentsRaw: { worker_environments: limitRows(allWorkerEnvironments, { limit: 1_000 }) },
+      movementsRaw: recentMovements
+        ? { movements: recentMovements.movements.map(withoutRawProjectionEvidence), total: recentMovements.total }
         : { movements: [], total: 0 },
       runDetailsRaw: runDetails,
     };
@@ -169,7 +256,7 @@ function topologyRowsProjection(store) {
     });
   }
 
-  function artifactListProjection(projection, params) {
+  async function artifactListProjection(projection, params) {
     const requestedSource = stringValue(params?.source);
     if (requestedSource && !["ledger", "registry"].includes(requestedSource)) {
       throw new Error("artifact list source must be ledger or registry");
@@ -181,7 +268,18 @@ function topologyRowsProjection(store) {
     if (parsedLimit === null || parsedLimit < 1 || parsedLimit > 5_000) {
       throw new Error("artifact list limit must be an integer between 1 and 5000");
     }
-    const allRows = requestedSource === "ledger" ? ledgerArtifactRows(projection) : artifactRows(projection);
+    const allRows = requestedSource === "registry"
+      ? descriptorRows(projection, "artifact").map((row) => ({
+        ...row,
+        artifact_id: stringValue(row.id) || stringValue(row.name),
+        label: stringValue(row.label) || stringValue(row.id) || stringValue(row.name),
+        status: "registered",
+        route_label: stringValue(row.route_label),
+        created_at: stringValue(row.created_at),
+      }))
+      : requestedSource === "ledger"
+        ? await store.readIndexedLedgerArtifactRows(projection)
+        : await store.readIndexedArtifactRows(projection);
     const sourceRows = requestedSource
       ? allRows.filter((row) => stringValue(row.source) === requestedSource)
       : allRows;
@@ -203,20 +301,8 @@ function topologyRowsProjection(store) {
     };
   }
 
-  function artifactLabelRows(projection) {
-    const byLabel = new Map();
-    for (const artifact of artifactRows(projection)) {
-      const label = stringValue(artifact.label);
-      if (!label || byLabel.has(label)) continue;
-      byLabel.set(label, {
-        label,
-        lifecycle: stringValue(artifact.lifecycle) || stringValue(artifact.status) || "artifact",
-        allowed_writers: arrayValue(artifact.allowed_writers),
-        finalize_recommended: Boolean(artifact.finalize_recommended),
-        source: stringValue(artifact.source) || "projection.artifacts",
-      });
-    }
-    return Array.from(byLabel.values()).sort((a, b) => a.label.localeCompare(b.label));
+  async function artifactLabelRows(projection) {
+    return store.readIndexedArtifactLabelRows(projection);
   }
 
   return { artifactLabelRows, artifactListProjection, artifactRows, cachedTopologySnapshot, interfaceRows, ledgerArtifactRows, topologySnapshot };

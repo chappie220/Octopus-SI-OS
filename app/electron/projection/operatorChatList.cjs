@@ -36,7 +36,7 @@ function operatorChatListProjection(store) {
       .sort((a, b) => rowTimeMs(a) - rowTimeMs(b))[0];
     if (firstInbound) {
       const text = await cachedOperatorChatArtifactText({ home: projection.octopusHome, entry, row: firstInbound, protocol,
-        direction: "in", limit: 48, warnings: projection.warnings,
+        direction: "in", limit: 48, warnings: projection.warnings, memoryCache: store.operatorChatPreviewCache,
         resolve: (row, onVerifiedFiles) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection, onVerifiedFiles }) });
       if (text) return text;
     }
@@ -173,7 +173,7 @@ function operatorChatListProjection(store) {
     const movementSeq = numberValue(row?.seq, 0);
     if (!row || !artifactId || !movementSeq) return {};
     const text = await cachedOperatorChatArtifactText({ home: store.octopusHome(), entry, row, protocol,
-      direction: "out", limit: 240, warnings,
+      direction: "out", limit: 240, warnings, memoryCache: store.operatorChatPreviewCache,
       resolve: (row, onVerifiedFiles) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection, onVerifiedFiles }) });
     return {
       artifact_id: artifactId,

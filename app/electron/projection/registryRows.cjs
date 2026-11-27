@@ -1,4 +1,4 @@
-module.exports = { applicationPrivateConfigurationProjection, baseInterfaceRows, bindingRows, descendantEnvironmentIds, descriptorInventoryRows, descriptorKindRows, descriptorRows, eeInstanceRows, eeTemplateDescriptorRows, eeTemplateRows, envelopeRows, environmentLineage, filterInterfaces, goalRows, interfaceActivationEntries, isExactGitWorktreeRoot, isOperatorChatProviderFailureRow, isOperatorChatProviderMovement, lowestCommonEnvironment, markKindRows, markRows, normalizeDescriptorRow, octopusOsInterfaceSidecars, operatorOsProjectRows, policyRows, preserveProjectionEvidenceError, projectedFilesystemRootSurfaces, projectedGitSurfaces, projectedRunInterfaceIds, projectedWorktreeStatusSurfaces, projectionMemo, projectionSnapshot, projectionTruthChange, readEeInstanceRecords, readHostRootRefs, readRunRecords, recordCheckpointRowsFor, requiredVerifiedArtifactOutcome, requiredVerifiedArtifactOutcomeIndex, rootSlotLabel, runCheckpointRows, runRows, toolRows, unavailableViewerSurface, validAddressWithProtocols, validHttpAddress, validWebSocketAddress, validWorkerEnvironmentLiveState, validateEeInstancePolicyNarrowing, validateEePolicyProjectionSnapshot, validateProjectedEePolicy, validateProjectedRunRecordSemantics, validateProjectedWorkerInterfacePolicies, verifierRows, withoutRawProjectionEvidence, workerEnvironmentCapabilities, workerEnvironmentLiveAvailable, workerEnvironmentRows, workerEnvironmentSession, workerEnvironmentWorkspace, workerRows };
+module.exports = { applicationPrivateConfigurationProjection, baseInterfaceRows, bindingRows, descendantEnvironmentIds, descriptorInventoryRows, descriptorKindRows, descriptorRows, eeInstanceRows, eeTemplateDescriptorRows, eeTemplateRows, envelopeRows, environmentLineage, filterInterfaces, formatMarkRows, formatProjectionSnapshot, goalRows, interfaceActivationEntries, isExactGitWorktreeRoot, isOperatorChatProviderFailureRow, isOperatorChatProviderMovement, lowestCommonEnvironment, markKindRows, markRows, normalizeDescriptorRow, octopusOsInterfaceSidecars, operatorOsProjectRows, policyRows, preserveProjectionEvidenceError, projectedFilesystemRootSurfaces, projectedGitSurfaces, projectedRunInterfaceIds, projectedWorktreeStatusSurfaces, projectionMemo, projectionSnapshot, projectionTruthChange, readEeInstanceRecords, readHostRootRefs, readRunRecords, recordCheckpointRowsFor, requiredVerifiedArtifactOutcome, requiredVerifiedArtifactOutcomeIndex, rootSlotLabel, runCheckpointRows, runRows, toolRows, unavailableViewerSurface, validAddressWithProtocols, validHttpAddress, validWebSocketAddress, validWorkerEnvironmentLiveState, validateEeInstancePolicyNarrowing, validateEePolicyProjectionSnapshot, validateProjectedEePolicy, validateProjectedRunRecordSemantics, validateProjectedWorkerInterfacePolicies, verifierRows, withoutRawProjectionEvidence, workerEnvironmentCapabilities, workerEnvironmentLiveAvailable, workerEnvironmentRows, workerEnvironmentSession, workerEnvironmentWorkspace, workerRows };
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -940,12 +940,36 @@ function isOperatorChatProviderMovement(entry, row) {
       || row.kind === "InterfaceOutbound" && movementBoundaryInterface(row, "to") === entry.chatInterfaceId);
 }
 
+function formatProjectionSnapshot(projection, { ledgerLoaded, ledgerRowCount, latestMovement, invalidLedgerRows }) {
+  const counts = {};
+  for (const registry of DESCRIPTOR_REGISTRIES) {
+    counts[registry.kind] = descriptorRows(projection, registry.kind).length;
+  }
+  return {
+    projection: {
+      generated_at: projection.generatedAt,
+      generation: projection.generation,
+      repo_root: projection.repoRoot,
+      octopus_home: projection.octopusHome,
+      registry_root: projection.registryRoot,
+      state_root: projection.stateRoot,
+      runs_root: projection.runRecordsRoot,
+      durable_root: projection.durableRoot,
+      ledger_path: path.join(projection.durableRoot, "movements.jsonl"),
+      descriptor_counts: counts,
+      ledger_loaded: ledgerLoaded,
+      ledger_rows: ledgerRowCount,
+      latest_movement_seq: latestMovement?.seq ?? null,
+      latest_movement_recorded_at_unix_ms: latestMovement?.recorded_at_unix_ms ?? null,
+      invalid_run_records: projection.invalidRunRecords,
+      invalid_ledger_rows: invalidLedgerRows,
+      warnings: arrayValue(projection.warnings),
+    },
+  };
+}
+
 function projectionSnapshot(projection) {
   return projectionMemo(projection, "ledger", "projectionSnapshot", () => {
-    const counts = {};
-    for (const registry of DESCRIPTOR_REGISTRIES) {
-      counts[registry.kind] = descriptorRows(projection, registry.kind).length;
-    }
     const latestMovement = projection.ledgerRows.reduce((latest, row) => {
       const at = numberValue(row.recorded_at_unix_ms ?? row.wall_clock_unix_ms, 0);
       if (!latest || at > latest.recorded_at_unix_ms || (at === latest.recorded_at_unix_ms && numberValue(row.seq, 0) > latest.seq)) {
@@ -953,27 +977,12 @@ function projectionSnapshot(projection) {
       }
       return latest;
     }, null);
-    return {
-      projection: {
-        generated_at: projection.generatedAt,
-        generation: projection.generation,
-        repo_root: projection.repoRoot,
-        octopus_home: projection.octopusHome,
-        registry_root: projection.registryRoot,
-        state_root: projection.stateRoot,
-        runs_root: projection.runRecordsRoot,
-        durable_root: projection.durableRoot,
-        ledger_path: path.join(projection.durableRoot, "movements.jsonl"),
-        descriptor_counts: counts,
-        ledger_loaded: Boolean(projection.ledgerRevision),
-        ledger_rows: projection.ledgerRows.length,
-        latest_movement_seq: latestMovement?.seq ?? null,
-        latest_movement_recorded_at_unix_ms: latestMovement?.recorded_at_unix_ms ?? null,
-        invalid_run_records: projection.invalidRunRecords,
-        invalid_ledger_rows: projection.invalidLedgerRows,
-        warnings: arrayValue(projection.warnings),
-      },
-    };
+    return formatProjectionSnapshot(projection, {
+      ledgerLoaded: Boolean(projection.ledgerRevision),
+      ledgerRowCount: projection.ledgerRows.length,
+      latestMovement,
+      invalidLedgerRows: projection.invalidLedgerRows,
+    });
   });
 }
 
@@ -1178,14 +1187,12 @@ function bindingRows(projection) {
   });
 }
 
-function markRows(projection) {
-  return projectionMemo(projection, "ledger", "markRows", () => {
-    const runs = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
-    const originals = new Map(descriptorRows(projection, "interface").map((descriptor) => [stringValue(descriptor.id), stringValue(descriptor.copy_of)]));
-    return projection.ledgerRows.flatMap((row) => {
+function formatMarkRows(projection, sourceRows) {
+  const runs = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
+  const originals = new Map(descriptorRows(projection, "interface").map((descriptor) => [stringValue(descriptor.id), stringValue(descriptor.copy_of)]));
+  return sourceRows.flatMap((row) => {
     const match = /^MarkOutcomeAdmitted\((.+)\)$/.exec(stringValue(row.kind));
     if (!match) return [];
-    const metadata = objectOrEmpty(row.invocation_metadata);
     const runId = movementRunId(row);
     const run = runs.get(runId);
     return [{
@@ -1204,8 +1211,11 @@ function markRows(projection) {
       source: "ledger",
       raw: row,
     }];
-    });
   });
+}
+
+function markRows(projection) {
+  return projectionMemo(projection, "ledger", "markRows", () => formatMarkRows(projection, projection.ledgerRows));
 }
 
 function envelopeRows(projection) {

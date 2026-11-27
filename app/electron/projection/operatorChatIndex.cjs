@@ -2,6 +2,7 @@ module.exports = { operatorChatIndexProjection };
 
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
+const path = require("node:path");
 const { setImmediate: yieldToClient } = require("node:timers/promises");
 const { isHomeVoiceInput } = require("./operatorChatVoiceInput.cjs");
 const { indexedMovementRunId, indexedUnsignedInteger, ledgerRowsForRun, movementBoundaryInterface, movementKindText, movementRunId, normalizeIndexedProjectionMovement, openValidatedLedgerIndex } = require("./movementRows.cjs");
@@ -9,7 +10,16 @@ const { operatorChatEventIdentity } = require("./operatorChatEvents.cjs");
 const { isOperatorChatProviderFailureRow, preserveProjectionEvidenceError } = require("./registryRows.cjs");
 const { arrayValue, ledgerArtifactLabel, numberValue, objectOrEmpty, stringValue } = require("./values.cjs");
 
+const CHAT_LEDGER_KIND_SCAN_BOUND = 50_000;
+
 function operatorChatIndexProjection(store) {
+  let chatLedgerState = null;
+  let chatLedgerTail = Promise.resolve();
+
+  function closeOperatorChatIndexProjection() {
+    chatLedgerState = null;
+  }
+
   function operatorChatIncrementalEventKey(payload, eventKind) {
     if (![
       "commentary_delta",
@@ -154,8 +164,179 @@ function operatorChatIndexProjection(store) {
     ]));
   }
 
+  function appendChatRow(rowsByRun, runId, row) {
+    if (!runId) return;
+    let list = rowsByRun.get(runId);
+    if (!list) {
+      list = [];
+      rowsByRun.set(runId, list);
+    }
+    list.push(row);
+  }
+
+  async function streamChatLedgerTail(ledgerPath, startOffset, expectedSeq, onRow) {
+    const stat = await fs.stat(ledgerPath);
+    if (stat.size < startOffset) return null;
+    if (stat.size === startOffset) {
+      return { consumedOffset: startOffset, nextSeq: expectedSeq, nextMovementSeq: expectedSeq - 1, stat };
+    }
+    let consumedOffset = startOffset;
+    let pending = Buffer.alloc(0);
+    for await (const chunk of fsSync.createReadStream(ledgerPath, { start: startOffset, end: stat.size - 1 })) {
+      const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let recordStart = 0;
+      for (;;) {
+        const newline = bytes.indexOf(0x0a, recordStart);
+        if (newline < 0) break;
+        const end = newline > recordStart && bytes[newline - 1] === 0x0d ? newline - 1 : newline;
+        const raw = bytes.subarray(recordStart, end);
+        consumedOffset += (newline - recordStart) + 1;
+        recordStart = newline + 1;
+        if (!raw.length) continue;
+        const movement = store.parseCanonicalMovement(raw, ledgerPath, expectedSeq + 1);
+        const seq = indexedUnsignedInteger(movement?.seq);
+        if (seq === null || seq !== expectedSeq) return null;
+        expectedSeq += 1;
+        const kind = movementKindText(movement?.kind);
+        if (kind !== "InterfaceArrival" && kind !== "InterfaceOutbound") continue;
+        const projected = {
+          ...movement,
+          kind,
+          envelope_id: stringValue(movement.envelope_id ?? movement.id) || `movements:${seq + 1}`,
+          source_file: ledgerPath,
+          source_line: seq + 1,
+        };
+        onRow(projected);
+      }
+      pending = bytes.subarray(recordStart);
+    }
+    return {
+      consumedOffset,
+      nextSeq: expectedSeq,
+      nextMovementSeq: expectedSeq - 1,
+      stat,
+    };
+  }
+
+  function ensureChatLedgerState(projection) {
+    const read = chatLedgerTail.then(() => ensureChatLedgerStateUnlocked(projection));
+    chatLedgerTail = read.then(() => undefined, () => undefined);
+    return read;
+  }
+
+  async function ensureChatLedgerStateUnlocked(projection) {
+    const durableRoot = projection.durableRoot;
+    const ledgerPath = path.join(durableRoot, "movements.jsonl");
+    let stat;
+    try {
+      stat = await fs.stat(ledgerPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        chatLedgerState = null;
+        return null;
+      }
+      throw error;
+    }
+
+    const current = chatLedgerState;
+    if (
+      current
+      && current.durableRoot === durableRoot
+      && current.dev === stat.dev
+      && current.ino === stat.ino
+      && stat.size >= current.durableOffset
+    ) {
+      if (stat.size === current.durableOffset) return current;
+      const tail = await streamChatLedgerTail(
+        ledgerPath,
+        current.durableOffset,
+        current.nextSeq,
+        (row) => appendChatRow(current.rowsByRun, movementRunId(row), row),
+      );
+      if (tail !== null) {
+        current.durableOffset = tail.consumedOffset;
+        current.nextSeq = tail.nextSeq;
+        current.nextMovementSeq = tail.nextMovementSeq;
+        return current;
+      }
+    }
+
+    const index = await openValidatedLedgerIndex(projection);
+    if (!index) return null;
+    try {
+      const probeKindBound = index.database.prepare(
+        "SELECT 1 FROM movements WHERE kind = ? AND seq < ? LIMIT 1 OFFSET ?",
+      );
+      const useKindIndex = !probeKindBound.get("InterfaceArrival", index.watermark, CHAT_LEDGER_KIND_SCAN_BOUND)
+        && !probeKindBound.get("InterfaceOutbound", index.watermark, CHAT_LEDGER_KIND_SCAN_BOUND);
+      if (!useKindIndex) {
+        chatLedgerState = null;
+        return { overflow: true };
+      }
+      const rowsByRun = new Map();
+      const statement = index.database.prepare(
+        `SELECT
+          seq, lamport, recorded_at_unix_ms, trace, kind,
+          from_kind, from_id, to_kind, to_id,
+          artifact_id, artifact_content,
+          runtime_run, runtime_checkpoint, runtime_interface
+        FROM movements
+        WHERE kind IN ('InterfaceArrival', 'InterfaceOutbound')
+          AND seq < ?
+        ORDER BY seq ASC`,
+      );
+      let count = 0;
+      for (const row of statement.iterate(index.watermark)) {
+        const runId = indexedMovementRunId(row);
+        if (runId) {
+          appendChatRow(rowsByRun, runId, normalizeIndexedProjectionMovement(row, index.ledgerPath));
+        }
+        if (++count % 256 === 0) await yieldToClient();
+      }
+      await yieldToClient();
+
+      const tail = await streamChatLedgerTail(
+        index.ledgerPath,
+        index.durableEndOffset,
+        index.watermark,
+        (row) => appendChatRow(rowsByRun, movementRunId(row), row),
+      );
+      if (tail === null) return null;
+      const nextState = {
+        durableRoot,
+        ledgerPath: index.ledgerPath,
+        dev: tail.stat.dev,
+        ino: tail.stat.ino,
+        durableOffset: tail.consumedOffset,
+        nextSeq: tail.nextSeq,
+        nextMovementSeq: tail.nextMovementSeq,
+        rowsByRun,
+      };
+      chatLedgerState = nextState;
+      return nextState;
+    } catch (error) {
+      preserveProjectionEvidenceError(error);
+      return null;
+    } finally {
+      index.database.close();
+    }
+  }
+
   async function readIndexedOperatorChatLedgerRows(projection, runIds) {
-    if (runIds.size === 0) return new Map();
+    if (runIds.size === 0) return { rowsByRun: new Map(), nextMovementSeq: -1 };
+    const state = await ensureChatLedgerState(projection);
+    if (state && !state.overflow) {
+      const rowsByRun = new Map([...runIds].map((runId) => [
+        runId,
+        [...(state.rowsByRun.get(runId) ?? [])],
+      ]));
+      return {
+        rowsByRun,
+        nextMovementSeq: state.nextMovementSeq,
+      };
+    }
+    if (!state) return null;
+    // Bounded per-run SQLite fallback when chat rows exceed CHAT_LEDGER_KIND_SCAN_BOUND.
     const index = await openValidatedLedgerIndex(projection);
     if (!index) return null;
     try {
@@ -207,41 +388,19 @@ function operatorChatIndexProjection(store) {
 
   async function readIndexedLedgerTail(ledgerPath, startOffset, expectedSeq, runIds) {
     const rowsByRun = new Map([...runIds].map((runId) => [runId, []]));
-    const stat = await fs.stat(ledgerPath);
-    if (stat.size < startOffset) return null;
-    if (stat.size === startOffset) return { rowsByRun, nextMovementSeq: expectedSeq - 1 };
-    let pending = Buffer.alloc(0);
-    for await (const chunk of fsSync.createReadStream(ledgerPath, { start: startOffset })) {
-      const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
-      let recordStart = 0;
-      for (;;) {
-        const newline = bytes.indexOf(0x0a, recordStart);
-        if (newline < 0) break;
-        const end = newline > recordStart && bytes[newline - 1] === 0x0d ? newline - 1 : newline;
-        const raw = bytes.subarray(recordStart, end);
-        recordStart = newline + 1;
-        if (!raw.length) continue;
-        const movement = store.parseCanonicalMovement(raw, ledgerPath, expectedSeq + 1);
-        const seq = indexedUnsignedInteger(movement?.seq);
-        if (seq === null || seq !== expectedSeq) return null;
-        expectedSeq += 1;
-        const kind = movementKindText(movement?.kind);
-        if (kind !== "InterfaceArrival" && kind !== "InterfaceOutbound") continue;
-        const projected = {
-          ...movement,
-          kind,
-          envelope_id: stringValue(movement.envelope_id ?? movement.id) || `movements:${seq + 1}`,
-          source_file: ledgerPath,
-          source_line: seq + 1,
-        };
+    const tail = await streamChatLedgerTail(
+      ledgerPath,
+      startOffset,
+      expectedSeq,
+      (projected) => {
         const runId = movementRunId(projected);
         if (runIds.has(runId)) rowsByRun.get(runId).push(projected);
-      }
-      pending = bytes.subarray(recordStart);
-    }
+      },
+    );
+    if (tail === null) return null;
     return {
       rowsByRun,
-      nextMovementSeq: expectedSeq - 1,
+      nextMovementSeq: tail.nextMovementSeq,
     };
   }
 
@@ -262,6 +421,23 @@ function operatorChatIndexProjection(store) {
   }
 
   async function readIndexedOperatorChatLedgerDelta(projection, runIds, afterSeq) {
+    const state = await ensureChatLedgerState(projection);
+    if (state && !state.overflow) {
+      const rowsByRun = new Map();
+      for (const runId of runIds) {
+        const rows = state.rowsByRun.get(runId);
+        if (!rows || rows.length === 0 || numberValue(rows[rows.length - 1].seq, -1) <= afterSeq) {
+          rowsByRun.set(runId, []);
+        } else {
+          rowsByRun.set(runId, rows.filter((row) => numberValue(row.seq, -1) > afterSeq));
+        }
+      }
+      return {
+        rowsByRun,
+        nextMovementSeq: Math.max(afterSeq, state.nextMovementSeq),
+      };
+    }
+    if (!state) return null;
     const index = await openValidatedLedgerIndex(projection);
     if (!index) return null;
     try {
@@ -307,5 +483,5 @@ function operatorChatIndexProjection(store) {
     }
   }
 
-  return { buildOperatorChatRunIndex, operatorChatIncrementalEventKey, operatorChatLedgerDelta, operatorChatLedgerRows, operatorChatRunIndex, readIndexedLedgerTail, readIndexedOperatorChatLedgerDelta, readIndexedOperatorChatLedgerRows };
+  return { buildOperatorChatRunIndex, closeOperatorChatIndexProjection, operatorChatIncrementalEventKey, operatorChatLedgerDelta, operatorChatLedgerRows, operatorChatRunIndex, readIndexedLedgerTail, readIndexedOperatorChatLedgerDelta, readIndexedOperatorChatLedgerRows };
 }

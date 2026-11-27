@@ -42,7 +42,8 @@ _VERDICTS = {}
 _VERDICT_INPUT_ERROR = None
 _NEXT_REQUEST_ID = 1
 _LEDGER_LOCK = threading.RLock()
-_LEDGER_FALLBACK = {"offset": 0, "size": 0, "identity": None}
+_LEDGER_FALLBACK = {"offset": 0, "size": 0, "identity": None, "idle_next_seq": None}
+_INDEX_STATE = {"conn": None, "identity": None, "idle_stamp": None, "idle_next_seq": None}
 _LEDGER_INDEX_RETRY_SECONDS = 30
 _ledger_index_retry_at = 0
 _STDERR_LOCK = threading.Lock()
@@ -407,20 +408,90 @@ def require_outbound_runtime(movement):
     return runtime
 
 
-def read_index(next_seq, limit):
-    connection = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(LEDGER_INDEX_SQLITE))}?mode=ro", uri=True, timeout=0.25)
+def _optional_stat_tuple(path):
     try:
-        if connection.execute("SELECT value FROM index_meta WHERE key = 'schema_version'").fetchone() != ("4",):
-            raise RuntimeError("Telegram ledger index schema is unsupported")
-        rows = connection.execute(
-            "SELECT seq, artifact_content, runtime_run, runtime_checkpoint, from_id FROM movements "
-            "WHERE runtime_interface = ? AND kind = 'InterfaceOutbound' "
-            "AND from_kind = 'interface' AND to_kind = 'interface' AND to_id = ? AND seq >= ? "
-            "ORDER BY seq ASC LIMIT ?",
-            (INTERFACE_ID, INTERFACE_ID, next_seq, limit),
-        ).fetchall()
-    finally:
-        connection.close()
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _ledger_index_stamp():
+    st = os.stat(LEDGER_INDEX_SQLITE)
+    if not stat.S_ISREG(st.st_mode):
+        raise RuntimeError("Telegram ledger index is not a regular file")
+    identity = (st.st_dev, st.st_ino)
+    stamp = (
+        st.st_dev,
+        st.st_ino,
+        st.st_size,
+        st.st_mtime_ns,
+        st.st_ctime_ns,
+        _optional_stat_tuple(f"{LEDGER_INDEX_SQLITE}-wal"),
+        _optional_stat_tuple(MOVEMENTS_JSONL),
+    )
+    return identity, stamp
+
+
+def _close_index_connection():
+    conn = _INDEX_STATE["conn"]
+    _INDEX_STATE["conn"] = None
+    _INDEX_STATE["identity"] = None
+    _INDEX_STATE["idle_stamp"] = None
+    _INDEX_STATE["idle_next_seq"] = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def read_index(next_seq, limit):
+    with _LEDGER_LOCK:
+        identity, stamp = _ledger_index_stamp()
+        if (
+            _INDEX_STATE["conn"] is not None
+            and _INDEX_STATE["identity"] == identity
+            and _INDEX_STATE["idle_stamp"] == stamp
+            and _INDEX_STATE["idle_next_seq"] == next_seq
+        ):
+            return []
+        if _INDEX_STATE["conn"] is None or _INDEX_STATE["identity"] != identity:
+            _close_index_connection()
+            connection = sqlite3.connect(
+                f"file:{urllib.parse.quote(os.path.abspath(LEDGER_INDEX_SQLITE))}?mode=ro",
+                uri=True,
+                timeout=0.25,
+                check_same_thread=False,
+            )
+            try:
+                if connection.execute("SELECT value FROM index_meta WHERE key = 'schema_version'").fetchone() != ("4",):
+                    raise RuntimeError("Telegram ledger index schema is unsupported")
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+                raise
+            _INDEX_STATE["conn"] = connection
+            _INDEX_STATE["identity"] = identity
+        try:
+            rows = _INDEX_STATE["conn"].execute(
+                "SELECT seq, artifact_content, runtime_run, runtime_checkpoint, from_id FROM movements "
+                "WHERE runtime_interface = ? AND kind = 'InterfaceOutbound' "
+                "AND from_kind = 'interface' AND to_kind = 'interface' AND to_id = ? AND seq >= ? "
+                "ORDER BY seq ASC LIMIT ?",
+                (INTERFACE_ID, INTERFACE_ID, next_seq, limit),
+            ).fetchall()
+        except Exception:
+            _close_index_connection()
+            raise
+        if not rows:
+            _INDEX_STATE["idle_stamp"] = stamp
+            _INDEX_STATE["idle_next_seq"] = next_seq
+            return []
+        _INDEX_STATE["idle_stamp"] = None
+        _INDEX_STATE["idle_next_seq"] = None
     result = []
     for seq, content, run, checkpoint, source_interface in rows:
         seq = require_int(seq, "Telegram ledger index seq", 0)
@@ -436,6 +507,17 @@ def read_index(next_seq, limit):
 def read_ledger(next_seq, limit, max_row_bytes):
     max_row_bytes = require_int(max_row_bytes, "Telegram ledger.max_row_bytes", 256, 16777216)
     with _LEDGER_LOCK:
+        try:
+            quick_stat = os.stat(MOVEMENTS_JSONL)
+        except FileNotFoundError:
+            return []
+        if (
+            stat.S_ISREG(quick_stat.st_mode)
+            and (quick_stat.st_dev, quick_stat.st_ino) == _LEDGER_FALLBACK["identity"]
+            and quick_stat.st_size == _LEDGER_FALLBACK["offset"]
+            and _LEDGER_FALLBACK.get("idle_next_seq") == next_seq
+        ):
+            return []
         try:
             descriptor = os.open(MOVEMENTS_JSONL, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
@@ -480,6 +562,7 @@ def read_ledger(next_seq, limit, max_row_bytes):
             _LEDGER_FALLBACK["offset"] = safe_offset
             _LEDGER_FALLBACK["size"] = os.fstat(handle.fileno()).st_size
             _LEDGER_FALLBACK["identity"] = identity
+            _LEDGER_FALLBACK["idle_next_seq"] = next_seq if not result else None
         return result
 
 

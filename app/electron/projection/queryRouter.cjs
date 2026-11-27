@@ -23,7 +23,7 @@ function queryRouterProjection(store) {
     if (method === "projection.operator.providers.list") {
       const home = store.octopusHome();
       store.ensureProjectionWatchers();
-      const providers = await readProviderInterfaceDescriptors(path.join(home, "registry"));
+      const providers = await store.cachedProviderInterfaceDescriptors(path.join(home, "registry"));
       if (home !== store.octopusHome()) throw new Error("Provider catalogue Home changed during read");
       return { providers };
     }
@@ -76,22 +76,61 @@ function queryRouterProjection(store) {
       projection = await store.withFileProjectionPackages(projection, includeLedger);
     }
     switch (method) {
-      case "projection.runtime.snapshot":
+      case "projection.runtime.snapshot": {
+        if (params.include_ledger !== false) {
+          const indexed = await store.readIndexedProjectionSnapshot(projection);
+          if (indexed) return indexed;
+          await store.refreshLedgerProjection(projection);
+        }
         return projectionSnapshot(projection);
+      }
       case "projection.runtime.topology":
         return store.cachedTopologySnapshot(projection, params);
-      case "projection.ee_instances.list":
-        return { ee_instances: limitRows(eeInstanceRows(projection, params.include_ledger !== false), params) };
-      case "projection.runs.list":
+      case "projection.ee_instances.list": {
+        const useLedger = params.include_ledger !== false;
+        if (useLedger) {
+          const indexed = await store.readIndexedEeInstanceRows(projection);
+          if (indexed) return { ee_instances: limitRows(indexed, params) };
+          await store.refreshLedgerProjection(projection);
+        }
+        return { ee_instances: limitRows(eeInstanceRows(projection, useLedger), params) };
+      }
+      case "projection.runs.list": {
+        const useLedger = params.include_ledger !== false;
+        if (useLedger) {
+          const indexed = await store.readIndexedRunRows(projection);
+          if (indexed) return { runs: limitRows(indexed, params), invalid_run_records: projection.invalidRunRecords };
+          await store.refreshLedgerProjection(projection);
+        }
         return {
-          runs: limitRows(runRows(projection, params.include_ledger !== false), params),
+          runs: limitRows(runRows(projection, useLedger), params),
           invalid_run_records: projection.invalidRunRecords,
         };
+      }
       case "projection.runs.checkpoints.list": {
-        const includeLedger = params.include_ledger !== false;
-        const outcomeIndex = includeLedger ? requiredVerifiedArtifactOutcomeIndex(projection) : new Map();
+        const useLedger = params.include_ledger !== false;
         const recordByRun = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
-        const runs = limitRows(runRows(projection, includeLedger), params);
+        if (useLedger) {
+          const indexedRuns = await store.readIndexedRunRows(projection);
+          const indexedOutcomes = await store.readIndexedOutcomeIndex(projection);
+          if (indexedRuns && indexedOutcomes) {
+            const runs = limitRows(indexedRuns, params);
+            return {
+              run_checkpoints: await Promise.all(runs.map(async (run) => {
+                const runId = stringValue(run.run_id);
+                return {
+                  run_id: runId,
+                  checkpoints: recordCheckpointRowsFor(projection, runId, indexedOutcomes, recordByRun)
+                    ?? (await store.readIndexedRunCheckpointRows(projection, runId))
+                    ?? [],
+                };
+              })),
+            };
+          }
+          await store.refreshLedgerProjection(projection);
+        }
+        const outcomeIndex = useLedger ? requiredVerifiedArtifactOutcomeIndex(projection) : new Map();
+        const runs = limitRows(runRows(projection, useLedger), params);
         return {
           run_checkpoints: runs.map((run) => {
             const runId = stringValue(run.run_id);
@@ -105,31 +144,61 @@ function queryRouterProjection(store) {
       }
       case "projection.runs.get": {
         const runId = requiredString(params.run_id, "run_id");
-        const includeLedger = params.include_ledger !== false;
-        const run = runRows(projection, includeLedger).find((row) => stringValue(row.run_id) === runId);
+        const useLedger = params.include_ledger !== false;
+        if (useLedger) {
+          const indexedRuns = await store.readIndexedRunRows(projection);
+          if (indexedRuns) {
+            const run = indexedRuns.find((row) => stringValue(row.run_id) === runId);
+            if (!run) throw new Error(`run is not present in file projection: ${runId}`);
+            const [allWorkerEnvs, allArtifacts, allMarks, outcomeIndex] = await Promise.all([
+              store.readIndexedWorkerEnvironmentRows(projection),
+              store.readIndexedArtifactRows(projection),
+              store.readIndexedMarkRows(projection),
+              store.readIndexedOutcomeIndex(projection),
+            ]);
+            const workerEnvironments = (allWorkerEnvs ?? workerEnvironmentRows(projection))
+              .filter((row) => stringValue(row.run_id) === runId);
+            return {
+              run,
+              bindings: bindingRows(projection).filter((row) => stringValue(row.run_id) === runId),
+              artifacts: allArtifacts.filter((row) => stringValue(row.run_id ?? row.meta?.run_id) === runId),
+              marks: allMarks.filter((row) => stringValue(row.run_id ?? row.meta?.run_id) === runId),
+              checkpoints: recordCheckpointRowsFor(projection, runId, outcomeIndex ?? new Map())
+                ?? (await store.readIndexedRunCheckpointRows(projection, runId))
+                ?? [],
+              worker_environments: workerEnvironments,
+              ...(workerEnvironments.length === 1 ? { worker_environment: workerEnvironments[0] } : {}),
+            };
+          }
+          await store.refreshLedgerProjection(projection);
+        }
+        const run = runRows(projection, useLedger).find((row) => stringValue(row.run_id) === runId);
         if (!run) throw new Error(`run is not present in file projection: ${runId}`);
         const workerEnvironments = workerEnvironmentRows(projection)
           .filter((row) => stringValue(row.run_id) === runId);
         return {
           run,
           bindings: bindingRows(projection).filter((row) => stringValue(row.run_id) === runId),
-          artifacts: includeLedger
+          artifacts: useLedger
             ? store.artifactRows(projection).filter((row) => stringValue(row.run_id ?? row.meta?.run_id) === runId)
             : [],
-          marks: includeLedger
+          marks: useLedger
             ? markRows(projection).filter((row) => stringValue(row.run_id ?? row.meta?.run_id) === runId)
             : [],
           checkpoints: recordCheckpointRowsFor(
             projection,
             runId,
-            includeLedger ? requiredVerifiedArtifactOutcomeIndex(projection) : new Map(),
-          ) ?? (includeLedger ? runCheckpointRows(projection, runId) : []),
+            useLedger ? requiredVerifiedArtifactOutcomeIndex(projection) : new Map(),
+          ) ?? (useLedger ? runCheckpointRows(projection, runId) : []),
           worker_environments: workerEnvironments,
           ...(workerEnvironments.length === 1 ? { worker_environment: workerEnvironments[0] } : {}),
         };
       }
       case "projection.trace.recent": {
         const runId = requiredString(params.run_id, "run_id");
+        const indexed = await store.readIndexedEnvelopes(projection, { ...params, run_id: runId });
+        if (indexed) return { events: limitRows(indexed, params) };
+        await store.refreshLedgerProjection(projection);
         const rows = envelopeRows(projection).filter((row) => stringValue(row.run_id ?? row.meta?.run_id ?? row.payload?.run_id) === runId);
         return { events: limitRows(rows, params) };
       }
@@ -145,17 +214,25 @@ function queryRouterProjection(store) {
       case "projection.bindings.list":
         return { bindings: limitRows(bindingRows(projection), params) };
       case "projection.artifacts.list":
-        return store.artifactListProjection(projection, params);
+        return await store.artifactListProjection(projection, params);
       case "projection.marks.list":
-        return { marks: limitRows(markRows(projection), params) };
+        return { marks: limitRows(await store.readIndexedMarkRows(projection), params) };
       case "projection.worker_environments.list":
         return { worker_environments: limitRows(workerEnvironmentRows(projection), params) };
       case "projection.worker_environment_pools.list":
         return { worker_environment_pools: [] };
-      case "projection.envelopes.list":
+      case "projection.envelopes.list": {
+        const indexed = await store.readIndexedEnvelopes(projection, params);
+        if (indexed) return { envelopes: limitRows(indexed, params) };
+        await store.refreshLedgerProjection(projection);
         return { envelopes: limitRows(filterByEnvelopeKind(envelopeRows(projection), params.kind), params) };
-      case "projection.interfaces.pending.list":
+      }
+      case "projection.interfaces.pending.list": {
+        const indexed = await store.readIndexedPendingArtifacts(projection);
+        if (indexed) return { pending_artifacts: limitRows(indexed, params) };
+        await store.refreshLedgerProjection(projection);
         return { pending_artifacts: limitRows(pendingArtifactRows(projection), params) };
+      }
       case "projection.goals.snapshot":
         return { goals: limitRows(goalRows(projection), params) };
       case "projection.ee_templates.list":
@@ -173,7 +250,7 @@ function queryRouterProjection(store) {
       case "projection.descriptors.kinds.list":
         return { descriptors: descriptorKindRows() };
       case "projection.descriptors.artifact_labels.list":
-        return { descriptors: limitRows(store.artifactLabelRows(projection), params) };
+        return { descriptors: limitRows(await store.artifactLabelRows(projection), params) };
       case "projection.descriptors.mark_kinds.list":
         return { descriptors: limitRows(markKindRows(projection), params) };
       case "projection.descriptors.tool.list":
