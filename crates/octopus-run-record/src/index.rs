@@ -133,7 +133,35 @@ impl RunRecordsIndex {
     }
 
     pub fn interfaces_requiring_life(&self) -> BTreeSet<InterfaceId> {
-        self.mentioned_interfaces.keys().cloned().collect()
+        let suspended_runs: BTreeSet<&str> = self
+            .slots
+            .iter()
+            .filter_map(|(run_id, slot)| {
+                slot.record
+                    .as_ref()
+                    .filter(|record| record.active_checkpoint_ids().is_empty())
+                    .map(|_| run_id.as_str())
+            })
+            .collect();
+        if suspended_runs.is_empty() {
+            return self.mentioned_interfaces.keys().cloned().collect();
+        }
+        let mut required = BTreeSet::new();
+        for slot in self.slots.values() {
+            let Some(record) = slot.record.as_ref() else {
+                continue;
+            };
+            if record.active_checkpoint_ids().is_empty() {
+                continue;
+            }
+            if writer_target_run(record)
+                .is_some_and(|target| suspended_runs.contains(target))
+            {
+                continue;
+            }
+            required.extend(slot.liveness_interfaces.iter().cloned());
+        }
+        required
     }
 
     fn install(
@@ -260,6 +288,15 @@ fn active_interface_checkpoints(record: &RunRecord) -> Vec<(InterfaceId, Checkpo
         pairs.push((interface.interface.clone(), checkpoint.id.clone()));
     }
     pairs
+}
+
+fn writer_target_run(record: &RunRecord) -> Option<&str> {
+    record.interface_state.values().find_map(|state| {
+        state
+            .get("file_writer_target")
+            .and_then(|target| target.get("run"))
+            .and_then(|run| run.as_str())
+    })
 }
 
 fn active_checkpoint_interfaces(record: &RunRecord) -> BTreeSet<InterfaceId> {
