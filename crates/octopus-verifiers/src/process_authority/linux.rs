@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 
 pub const CONTROL_SOCKET: &str = "/run/octopus-process-authority/control.sock";
 pub const PLATFORM_EXECUTABLE: &str = "/usr/libexec/octopus/octopus-linux-process-authority";
-pub const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
+pub const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,17 +129,18 @@ pub fn prepare_room(
     for root in roots {
         policy.add_path(root, FileAccess::Execute, false)?;
     }
+    policy.deduplicate_files();
     prepared(policy, executable, args)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileRule {
     pub selector: FileSelector,
     pub access: FileAccess,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileSelector {
     Exact {
@@ -151,12 +152,14 @@ pub enum FileSelector {
     },
     Names {
         directory: PathBuf,
+        #[serde(with = "os_string_wire")]
         prefix: OsString,
+        #[serde(with = "os_string_wire")]
         suffix: OsString,
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileAccess {
     Read,
@@ -165,6 +168,38 @@ pub enum FileAccess {
     Map,
     CreateDirectory,
     CreatePrivateDirectory,
+}
+
+mod os_string_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ffi::OsString;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireOsString {
+        Utf8(String),
+        Raw(OsString),
+    }
+
+    pub fn serialize<S>(value: &OsString, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value.to_str() {
+            Some(text) => serializer.serialize_str(text),
+            None => value.serialize(serializer),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<OsString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match WireOsString::deserialize(deserializer)? {
+            WireOsString::Utf8(text) => Ok(OsString::from(text)),
+            WireOsString::Raw(raw) => Ok(raw),
+        }
+    }
 }
 
 pub(super) fn prepare(
@@ -293,6 +328,7 @@ fn project(authority: &ProcessAuthority, executable: &Path) -> Result<LinuxProce
             }
         }
     }
+    policy.deduplicate_files();
     Ok(policy)
 }
 
@@ -313,6 +349,10 @@ fn prepared(
 }
 
 impl LinuxProcessPolicy {
+    fn deduplicate_files(&mut self) {
+        let mut seen = std::collections::HashSet::with_capacity(self.files.len());
+        self.files.retain(|rule| seen.insert(rule.clone()));
+    }
     fn add_path(&mut self, path: PathBuf, access: FileAccess, exact: bool) -> Result<(), String> {
         let directory = match std::fs::metadata(&path) {
             Ok(metadata) => metadata.is_dir(),
@@ -1046,5 +1086,114 @@ mod tests {
         assert!(executable_interpreter(&truncated_elf)
             .unwrap_err()
             .contains("truncated ELF header"));
+    }
+
+    #[test]
+    fn file_selector_names_uses_compact_utf8_strings_and_accepts_legacy_wire_format() {
+        let hex_prefix = "a".repeat(64);
+        let selector = FileSelector::Names {
+            directory: PathBuf::from("/tmp/octopus-pub"),
+            prefix: OsString::from(&hex_prefix),
+            suffix: OsString::from(".tmp"),
+        };
+        let encoded = serde_json::to_string(&selector).unwrap();
+        assert!(
+            encoded.contains(&format!("\"prefix\":\"{hex_prefix}\"")),
+            "expected compact UTF-8 prefix string, got: {encoded}"
+        );
+        assert!(
+            encoded.contains("\"suffix\":\".tmp\""),
+            "expected compact UTF-8 suffix string, got: {encoded}"
+        );
+        assert!(
+            !encoded.contains("\"Unix\":["),
+            "UTF-8 OsString must not serialize as byte integer array: {encoded}"
+        );
+        let decoded: FileSelector = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, selector);
+
+        let legacy_json = r#"{"scope":"names","directory":"/tmp/octopus-pub","prefix":{"Unix":[97,98,99]},"suffix":{"Unix":[46,116,109,112]}}"#;
+        let legacy_decoded: FileSelector = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            legacy_decoded,
+            FileSelector::Names {
+                directory: PathBuf::from("/tmp/octopus-pub"),
+                prefix: OsString::from("abc"),
+                suffix: OsString::from(".tmp"),
+            }
+        );
+
+        let raw_selector = FileSelector::Names {
+            directory: PathBuf::from("/tmp/octopus-pub"),
+            prefix: OsStr::from_bytes(b"bad-\xff-\xfe").to_os_string(),
+            suffix: OsString::from(".tmp"),
+        };
+        let raw_encoded = serde_json::to_string(&raw_selector).unwrap();
+        let raw_decoded: FileSelector = serde_json::from_str(&raw_encoded).unwrap();
+        assert_eq!(raw_decoded, raw_selector);
+    }
+
+    #[test]
+    fn project_deduplicates_files_and_keeps_81_file_batch_well_under_transport_limit() {
+        assert_eq!(MAX_REQUEST_BYTES, 4 * 1024 * 1024);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut writable_exact = BTreeSet::new();
+        for index in 0..81 {
+            let file = root
+                .join("registry")
+                .join("run_record")
+                .join("run_operator_chat_batch_test")
+                .join(format!("item_{index:02}"))
+                .join("descriptor.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            writable_exact.insert(file);
+        }
+        let executable = normalize_existing_path(PathBuf::from("/bin/sh")).unwrap();
+        let authority = ProcessAuthority {
+            sandbox_mode: octopus_descriptors::ProcessSandboxMode::Enforced,
+            readable: BTreeSet::from([root.clone()]),
+            writable: BTreeSet::new(),
+            executable: BTreeSet::new(),
+            readable_exact: BTreeSet::new(),
+            writable_exact,
+            executable_exact: BTreeSet::from([executable.clone()]),
+            executable_links: BTreeSet::new(),
+            allow_network: false,
+            allow_local_ipc: false,
+            allow_application_launch: false,
+            allow_sandbox_delegation: false,
+            allow_process_signals: false,
+        };
+        let policy = project(&authority, &executable).unwrap();
+        let unique: std::collections::HashSet<&FileRule> = policy.files.iter().collect();
+        assert_eq!(
+            unique.len(),
+            policy.files.len(),
+            "projected policy.files must be deduplicated"
+        );
+        assert!(
+            policy
+                .files
+                .iter()
+                .any(|rule| matches!(rule.selector, FileSelector::Names { .. })),
+            "expected FileSelector::Names rules from file publication access"
+        );
+        let payload = serde_json::to_vec(&policy).unwrap();
+        let payload_text = String::from_utf8(payload.clone()).unwrap();
+        assert!(
+            !payload_text.contains("\"Unix\":["),
+            "serialized policy should not contain Unix byte-array OsStrings"
+        );
+        eprintln!(
+            "P0-2 81-file batch policy: rules={}, payload_bytes={}",
+            policy.files.len(),
+            payload.len()
+        );
+        assert!(
+            (payload.len() as u64) < 300 * 1024,
+            "expected compact deduplicated 81-file policy well under 300 KiB, got {} bytes",
+            payload.len()
+        );
     }
 }
