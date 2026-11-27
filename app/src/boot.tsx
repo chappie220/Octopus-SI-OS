@@ -12,6 +12,20 @@ import "./boot.css";
 
 applyAppearance();
 
+function syncMobileViewportHeight(): void {
+  const root = document.documentElement;
+  const vv = window.visualViewport;
+  const height = vv && vv.height > 0 ? Math.round(vv.height) : window.innerHeight;
+  if (height > 0) {
+    root.style.setProperty("--octopus-viewport-height", `${height}px`);
+  }
+}
+
+syncMobileViewportHeight();
+window.addEventListener("resize", syncMobileViewportHeight);
+window.visualViewport?.addEventListener("resize", syncMobileViewportHeight);
+window.visualViewport?.addEventListener("scroll", syncMobileViewportHeight);
+
 const windowTransport = window.octopusTransport;
 if (windowTransport) {
   const applyWindowState = (state: { opaqueSurface: boolean; resizing: boolean }) => {

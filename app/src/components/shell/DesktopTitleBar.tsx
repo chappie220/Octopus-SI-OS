@@ -7,6 +7,7 @@ import { ShellTooltip } from "./ShellTooltip";
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
+  compactMobile?: boolean;
   onPrimaryActionsHostChange?: (host: HTMLDivElement | null) => void;
   onPaneControlsHostChange?: (host: HTMLDivElement | null) => void;
   contentDisabled?: boolean;
@@ -55,6 +56,7 @@ export type TitlebarSurfaceContext = {
 
 export function DesktopTitleBar({
   accessProfile,
+  compactMobile = false,
   onPrimaryActionsHostChange,
   onPaneControlsHostChange,
   contentDisabled = false,
@@ -178,10 +180,12 @@ export function DesktopTitleBar({
           />
         </span>
         {!settingsOpen && sidebarAvailable ? <TitlebarButton
+          actionId="toggle-navigation"
           buttonRef={sidebarToggleRef}
           glyph={sidebarOpen ? "sidebarOpen" : "sidebarClosed"}
-          label={`${sidebarOpen ? "Hide" : "Show"} sidebar`}
+          label={compactMobile ? `${sidebarOpen ? "Close" : "Open"} navigation` : `${sidebarOpen ? "Hide" : "Show"} sidebar`}
           onClick={onToggleSidebar}
+          open={compactMobile && sidebarOpen}
           shortcut={formatKeyboardShortcuts(shortcuts.toggle_sidebar ?? [])}
         /> : null}
       </div>
@@ -241,8 +245,9 @@ export function DesktopTitleBar({
             surfaceAction
           />
         ))}
-        {!settingsOpen && !secondaryPaneOpen && secondaryPaneCollapsed ? (
+        {!compactMobile && !settingsOpen && !secondaryPaneOpen && secondaryPaneCollapsed ? (
           <TitlebarButton
+            actionId="split-pane"
             glyph="splitPane"
             label="Open secondary pane"
             onClick={onToggleSecondaryPane}

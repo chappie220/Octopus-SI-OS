@@ -606,6 +606,7 @@ void main() {
   float structureMask = saturate(max(bodyReveal, assemblyRim));
   float contourLimit = SPHERE_RADIUS + 0.0015 + 0.0065 + 0.095 + antialias;
   vec3 color = u_background;
+  float orbAlpha = 0.0;
   if (structureMask > 0.0 && (sphere > 0.0 || (lightSurface < 1.0 && (radius < 0.49 || (outside > 0.0 && u_speaking > 0.0 && radius <= contourLimit))))) {
     float normalizedY = point.y / SPHERE_RADIUS;
     float topPole = smoothstep(0.12, 0.92, normalizedY);
@@ -711,6 +712,7 @@ void main() {
     float displayDither = (interleavedNoise(gl_FragCoord.xy + vec2(17.0, 41.0)) - 0.5) / 255.0;
     float ditherMask = saturate(outerAlpha * 7.0) * (1.0 - sphere) * canvasFade;
     color += vec3(displayDither * 1.7 * ditherMask);
+    orbAlpha = saturate(max(sphere, outerAlpha) * structureMask);
   }
 
   float dustArrival = smoothstep(0.015, 0.13, u_reveal);
@@ -808,13 +810,23 @@ void main() {
     particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
   }
 
-  vec3 revealedColor = mix(u_background, color, structureMask);
-  revealedColor += lightTint * particleLuminance * (1.0 - lightSurface);
-  revealedColor = mix(revealedColor, LIGHT_PARTICLE_INK, saturate(particleLuminance * 1.3) * lightSurface);
   vec3 darkGlyph = mix(vec3(0.72), vec3(0.97), saturate(rippleCrest * 1.2));
   vec3 lightGlyph = mix(vec3(0.4, 0.47, 0.6), LIGHT_PARTICLE_INK * 0.92, saturate(rippleCrest * 1.2));
-  revealedColor = mix(revealedColor, mix(darkGlyph, lightGlyph, lightSurface), saturate(glyphAlpha * mix(1.0, 1.15, lightSurface)));
-  outputColor = vec4(clamp(revealedColor, 0.0, 1.0), 1.0);
+  vec3 glyphColor = mix(darkGlyph, lightGlyph, lightSurface);
+  vec3 particleColor = mix(lightTint, LIGHT_PARTICLE_INK, lightSurface);
+  float particleAlpha = saturate(particleLuminance * mix(1.0, 1.3, lightSurface));
+  float glyphBlend = saturate(glyphAlpha * mix(1.0, 1.15, lightSurface));
+  float fgAlpha = saturate(max(max(orbAlpha, particleAlpha), glyphBlend));
+  vec3 composedColor = mix(particleColor, glyphColor, glyphBlend);
+  if (orbAlpha > 0.001) {
+    vec3 revealedColor = mix(u_background, color, structureMask);
+    revealedColor += lightTint * particleLuminance * (1.0 - lightSurface);
+    revealedColor = mix(revealedColor, LIGHT_PARTICLE_INK, saturate(particleLuminance * 1.3) * lightSurface);
+    revealedColor = mix(revealedColor, glyphColor, glyphBlend);
+    composedColor = mix(composedColor, revealedColor, saturate(orbAlpha / max(fgAlpha, 0.001)));
+  }
+  // Emit premultiplied alpha so pixels without orb/particles/glyphs stay transparent and let the CSS theme background show through.
+  outputColor = vec4(clamp(composedColor, 0.0, 1.0) * fgAlpha, fgAlpha);
 }
 `;
 
@@ -843,9 +855,9 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     const gl = canvas.getContext("webgl2", {
       alpha: true,
       antialias: false,
-      desynchronized: true,
       powerPreference: "high-performance",
-      premultipliedAlpha: false,
+      premultipliedAlpha: true,
+      preserveDrawingBuffer: true,
     });
     if (!gl) {
       setFailure("WebGL 2 is required for the voice scene");
@@ -1127,7 +1139,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     document.addEventListener("visibilitychange", handleVisibilityChange);
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["class", "data-theme"],
+      attributeFilter: ["class", "data-theme", "style"],
     });
     canvas.addEventListener("webglcontextlost", loseContext);
     resize();
@@ -1159,7 +1171,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     if (ambient && failure) onDispersedRef.current?.();
   }, [ambient, failure]);
 
-  if (failure) return <div className="voice-orb-scene-failure">{failure}</div>;
+  if (failure) return ambient ? null : <div className="voice-orb-scene-failure">{failure}</div>;
   return <canvas aria-hidden="true" className="voice-orb-canvas" ref={canvasRef} />;
 }
 
@@ -1224,10 +1236,33 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
 }
 
 function readBackgroundColor(canvas: HTMLCanvasElement): [number, number, number] {
+  const isLightTheme = document.documentElement.dataset.theme === "light"
+    || document.documentElement.classList.contains("electron-light");
+  const fallback: [number, number, number] = isLightTheme ? [1, 1, 1] : [24 / 255, 24 / 255, 24 / 255];
   const host = canvas.closest<HTMLElement>(".voice-view") ?? canvas;
-  const values = getComputedStyle(host).backgroundColor.match(/[\d.]+/g)?.map(Number);
-  if (!values || values.length < 3) return [24 / 255, 24 / 255, 24 / 255];
-  return [values[0] / 255, values[1] / 255, values[2] / 255];
+  const raw = getComputedStyle(host).backgroundColor;
+  if (!raw || raw === "transparent") return fallback;
+  try {
+    const probe = document.createElement("canvas");
+    probe.width = 1;
+    probe.height = 1;
+    const ctx = probe.getContext("2d", { willReadFrequently: true });
+    if (ctx) {
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.fillStyle = raw;
+      ctx.fillRect(0, 0, 1, 1);
+      const pixel = ctx.getImageData(0, 0, 1, 1).data;
+      if (pixel[3] === 0) return fallback;
+      return [pixel[0] / 255, pixel[1] / 255, pixel[2] / 255];
+    }
+  } catch {
+    // Fall back to regex parsing below when 2D canvas readback is unavailable.
+  }
+  const rgbMatch = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)$/i.exec(raw.trim());
+  if (!rgbMatch) return fallback;
+  const alpha = rgbMatch[4] === undefined ? 1 : Number(rgbMatch[4]);
+  if (!Number.isFinite(alpha) || alpha <= 0) return fallback;
+  return [Number(rgbMatch[1]) / 255, Number(rgbMatch[2]) / 255, Number(rgbMatch[3]) / 255];
 }
 
 function requiredUniform(gl: WebGL2RenderingContext, program: WebGLProgram, name: string): WebGLUniformLocation {

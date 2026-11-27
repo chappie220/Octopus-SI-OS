@@ -39,7 +39,9 @@ const SIDEBAR_MIN_WIDTH = 238;
 const SIDEBAR_MAX_WIDTH = 468;
 const SIDEBAR_DEFAULT_WIDTH = 288;
 const MAIN_CONTENT_MIN_WIDTH = 320;
-const SIDEBAR_AUTO_COLLAPSE_WIDTH = 768;
+const MOBILE_BREAKPOINT_WIDTH = 767;
+const TABLET_MAX_WIDTH = 1024;
+const TABLET_SIDEBAR_MAX_WIDTH = 264;
 
 type Props = {
   settingsSurface?: ReactNode;
@@ -198,19 +200,29 @@ export function AppShell({
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   const lastSidebarFocusRef = useRef<HTMLElement | null>(null);
   const sidebarAvailable = clientNavigationDestinations.some((destination) => destination.id === navigationSection && destination.sidebar);
-  const compactSidebar = viewportWidth <= SIDEBAR_AUTO_COLLAPSE_WIDTH;
-  const sidebarOpen = sidebarAvailable && (compactSidebar
-    ? compactSidebarState.scope === paneStateKey && compactSidebarState.open
-    : preferredSidebarOpen);
-  const sidebarMaximumWidth = Math.max(
-    SIDEBAR_MIN_WIDTH,
-    Math.min(SIDEBAR_MAX_WIDTH, viewportWidth - NAVIGATION_RAIL_WIDTH - MAIN_CONTENT_MIN_WIDTH),
-  );
+  const isMobile = viewportWidth <= MOBILE_BREAKPOINT_WIDTH;
+  const isTablet = viewportWidth > MOBILE_BREAKPOINT_WIDTH && viewportWidth <= TABLET_MAX_WIDTH;
+  const compactSidebar = isMobile;
+  const mobileDrawerOpen = compactSidebar && compactSidebarState.scope === paneStateKey && compactSidebarState.open;
+  const sidebarOpen = compactSidebar
+    ? sidebarAvailable && mobileDrawerOpen
+    : sidebarAvailable && preferredSidebarOpen;
+  const effectiveRailWidth = isMobile ? 0 : NAVIGATION_RAIL_WIDTH;
+  const sidebarMaximumWidth = isTablet
+    ? Math.max(220, Math.min(TABLET_SIDEBAR_MAX_WIDTH, viewportWidth - NAVIGATION_RAIL_WIDTH - 420))
+    : Math.max(
+      SIDEBAR_MIN_WIDTH,
+      Math.min(SIDEBAR_MAX_WIDTH, viewportWidth - effectiveRailWidth - MAIN_CONTENT_MIN_WIDTH),
+    );
   const effectiveSidebarWidth = Math.min(sidebarWidth, sidebarMaximumWidth);
   const sidebarMotion = useAnimatedPanelSize(sidebarOpen, effectiveSidebarWidth, undefined, sidebarResizing);
   const headerLeft = useTransform(
     [sidebarMotion.animatedSize, titlebarLeftWidth],
-    ([sidebar, controls]) => `max(${NAVIGATION_RAIL_WIDTH + Number(sidebar)}px, ${Number(controls)}px)`,
+    ([sidebar, controls]) => (
+      isMobile
+        ? `${Number(controls)}px`
+        : `max(${effectiveRailWidth + Number(sidebar)}px, ${Number(controls)}px)`
+    ),
   );
   const settingsHeaderLeft = useTransform(titlebarLeftWidth, (controls) => `${controls}px`);
   const headerRight = useTransform(
@@ -220,10 +232,12 @@ export function AppShell({
   const primaryTopbarInset = useTransform(
     [viewportWidthMotion, sidebarMotion.animatedSize, secondaryPaneWidth],
     ([viewport, sidebar, secondary]) => (
-      Number(viewport) - NAVIGATION_RAIL_WIDTH - Number(sidebar) - Number(secondary) <= 760 ? "8px" : "17px"
+      Number(viewport) - effectiveRailWidth - Number(sidebar) - Number(secondary) <= 760 ? "8px" : "17px"
     ),
   );
-  const sidebarLayoutWidth = useTransform(sidebarMotion.animatedSize, (width) => `${NAVIGATION_RAIL_WIDTH + width}px`);
+  const sidebarLayoutWidth = useTransform(sidebarMotion.animatedSize, (width) => (
+    isMobile ? "0px" : `${effectiveRailWidth + width}px`
+  ));
   const titlebarRight = useTransform(titlebarRightWidth, (width) => `${width}px`);
 
   useLayoutEffect(() => {
@@ -240,7 +254,9 @@ export function AppShell({
     if (focusInsideSidebar) {
       lastSidebarFocusRef.current = document.activeElement as HTMLElement;
     }
-    onSidebarOpenChange(open);
+    if (!compactSidebar) {
+      onSidebarOpenChange(open);
+    }
     setCompactSidebarState({ scope: paneStateKey, open });
     if (focusInsideSidebar) window.requestAnimationFrame(() => sidebarToggleRef.current?.focus());
     if (open && moveFocus) {
@@ -250,7 +266,7 @@ export function AppShell({
         else shellRef.current?.querySelector<HTMLElement>(".app-shell-sidebar-slot [data-sidebar-nav-item]")?.focus();
       });
     }
-  }, [onSidebarOpenChange, paneStateKey]);
+  }, [compactSidebar, onSidebarOpenChange, paneStateKey]);
 
   const completeCompactNavigation = () => {
     if (compactSidebar) setCompactSidebarState({ scope: paneStateKey, open: false });
@@ -258,8 +274,8 @@ export function AppShell({
 
   useEffect(() => subscribeClientCommands((command) => {
     if (command !== "toggle_sidebar" || interactionDisabled) return;
-    if (sidebarAvailable) setSidebarOpen(!sidebarOpen);
-  }), [interactionDisabled, setSidebarOpen, sidebarAvailable, sidebarOpen]);
+    if (sidebarAvailable || compactSidebar) setSidebarOpen(compactSidebar ? !mobileDrawerOpen : !sidebarOpen);
+  }), [compactSidebar, interactionDisabled, mobileDrawerOpen, setSidebarOpen, sidebarAvailable, sidebarOpen]);
 
   useLayoutEffect(() => {
     setCompactSidebarState({ scope: paneStateKey, open: false });
@@ -282,13 +298,17 @@ export function AppShell({
     "--app-shell-titlebar-right": titlebarRight,
     "--sidebar-layout-w": sidebarLayoutWidth,
     "--sidebar-w": `${effectiveSidebarWidth}px`,
-    "--navigation-rail-width": `${NAVIGATION_RAIL_WIDTH}px`,
+    "--navigation-rail-width": `${effectiveRailWidth}px`,
+    "--navigation-rail-drawer-width": `${NAVIGATION_RAIL_WIDTH}px`,
   } as MotionStyle;
 
   return (
     <motion.div
       className={[
         "app-shell",
+        isMobile && "is-mobile",
+        isTablet && "is-tablet",
+        mobileDrawerOpen && "is-mobile-drawer-open",
         dashboardExpanded && "is-dashboard-expanded",
         sidebarOpen ? "is-sidebar-open" : "is-sidebar-closed",
         sidebarResizing && "is-sidebar-resizing",
@@ -303,7 +323,8 @@ export function AppShell({
     >
       <DesktopTitleBar
         accessProfile={accessProfile}
-        contentDisabled={compactSidebar && sidebarOpen}
+        compactMobile={isMobile}
+        contentDisabled={mobileDrawerOpen}
         primaryPaneBlocked={primaryPaneBlocked}
         onPrimaryActionsHostChange={setPrimaryActionsHost}
         onCloseSettings={onCloseSettings}
@@ -311,8 +332,8 @@ export function AppShell({
         settingsOpen={interactionDisabled}
         canNavigateBack={canNavigateBack}
         canNavigateForward={canNavigateForward}
-        sidebarOpen={sidebarOpen}
-        sidebarAvailable={sidebarAvailable}
+        sidebarOpen={isMobile ? mobileDrawerOpen : sidebarOpen}
+        sidebarAvailable={sidebarAvailable || isMobile}
         secondaryPaneFocused={secondaryPaneFocused}
         secondaryPaneOpen={secondaryPaneOpen}
         secondaryPaneWidth={secondaryPaneWidth}
@@ -330,7 +351,7 @@ export function AppShell({
         onNavigateBack={onNavigateBack}
         onNavigateForward={onNavigateForward}
         onSlotWidthsChange={onTitlebarSlotWidthsChange}
-        onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        onToggleSidebar={() => setSidebarOpen(isMobile ? !mobileDrawerOpen : !sidebarOpen)}
         onToggleSecondaryPane={onToggleSecondaryPane}
         onSurfaceContextPointerDown={onTitlebarSurfaceContextPointerDown}
         onSurfaceTitleClick={onTitlebarSurfaceTitleClick}
@@ -339,19 +360,28 @@ export function AppShell({
       <NavigationRail
         accessProfile={accessProfile}
         activeSection={navigationSection}
+        disabled={isMobile && !mobileDrawerOpen}
+        labeledDrawer={isMobile && !sidebarAvailable}
         surfaces={surfaces}
         unreadCount={inboxUnreadCount}
         arrivalId={inboxArrivalId}
         runtimeHost={runtimeHost}
         onNavigate={(section) => {
           onNavigationChange(section);
+          completeCompactNavigation();
         }}
-        onOpenSettings={onOpenSettings}
-        onLogOut={onLogOut}
+        onOpenSettings={(section) => {
+          onOpenSettings(section);
+          completeCompactNavigation();
+        }}
+        onLogOut={() => {
+          completeCompactNavigation();
+          onLogOut();
+        }}
       />
       <div className="app-shell-page">
         <div className="app-shell-page-region" aria-hidden={interactionDisabled || undefined} inert={interactionDisabled || undefined}>
-          {compactSidebar && sidebarOpen ? (
+          {mobileDrawerOpen ? (
             <button aria-label="Close navigation" className="app-shell-sidebar-backdrop" onClick={() => setSidebarOpen(false)} type="button" />
           ) : null}
 
@@ -429,7 +459,7 @@ export function AppShell({
             ) : null}
           </motion.aside>
 
-          <main className="workspace main-surface" inert={compactSidebar && sidebarOpen || undefined}>
+          <main className="workspace main-surface" inert={mobileDrawerOpen || undefined}>
             <WindowPaneControlsProvider host={windowPaneControlsHost}>
               <WorkspacePaneManager
                 key={paneStateKey}

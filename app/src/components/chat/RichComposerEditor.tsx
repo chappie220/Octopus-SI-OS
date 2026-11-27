@@ -121,6 +121,7 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
     });
     view.dom.dataset.octopusComposer = "true";
     view.dom.dataset.virtualkeyboard = "true";
+    view.dom.setAttribute("inputmode", "text");
     view.dom.setAttribute("aria-label", placeholderRef.current);
     view.dom.setAttribute("role", "textbox");
     view.dom.setAttribute("aria-multiline", "true");
@@ -130,8 +131,16 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
     view.dom.style.height = "auto";
     view.dom.style.minHeight = "2.5rem";
     view.dom.style.resize = "none";
+    const handleFocus = () => {
+      if (window.innerWidth > 767) return;
+      window.requestAnimationFrame(() => {
+        view.dom.closest<HTMLElement>("[data-octopus-composer-root]")?.scrollIntoView({ block: "nearest" });
+      });
+    };
+    view.dom.addEventListener("focus", handleFocus);
     viewRef.current = view;
     return () => {
+      view.dom.removeEventListener("focus", handleFocus);
       viewRef.current = null;
       view.destroy();
     };
@@ -177,7 +186,13 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
   return (
     <div
       className={`${className} relative`}
+      onClick={(event) => {
+        const editor = viewRef.current?.dom;
+        if (!editor || event.target instanceof Node && (editor.contains(event.target) || popoverRef.current?.contains(event.target))) return;
+        viewRef.current?.focus();
+      }}
       onMouseDown={(event) => {
+        if (event.button !== 0) return;
         const editor = viewRef.current?.dom;
         if (!editor || event.target instanceof Node && (editor.contains(event.target) || popoverRef.current?.contains(event.target))) return;
         event.preventDefault();

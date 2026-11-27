@@ -3990,8 +3990,87 @@ mark.octopus-thread-find-active {
   color: var(--color-token-foreground);
 }
 
-@media (max-width: 760px) {
+@media (max-width: 767px) {
+  [data-thread-scroll-footer="true"] {
+    padding-bottom: max(10px, env(safe-area-inset-bottom, 0px)) !important;
+  }
 
+  [data-thread-scroll-footer="true"] > div > div {
+    padding-inline: 8px !important;
+  }
+
+  .composer-utility-bar {
+    margin-inline: 4px;
+    padding-block: 6px 24px;
+    padding-inline: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .composer-utility-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .composer-utility-bar > [role="group"] {
+    overflow: visible;
+    flex-wrap: nowrap;
+  }
+
+  .composer-editor-root .ProseMirror {
+    min-height: 40px;
+    font-size: 16px !important;
+    line-height: 22px;
+    touch-action: manipulation;
+  }
+
+  .composer-footer {
+    min-height: 38px;
+    gap: 4px;
+    padding-inline: 6px;
+  }
+
+  .composer-footer .composer-primary-action,
+  .composer-footer [data-composer-navigation-target="add-context"],
+  .composer-footer .composer-round-button {
+    min-width: 36px;
+    min-height: 36px;
+    touch-action: manipulation;
+  }
+
+  .composer-footer [data-octopus-provider-picker] {
+    min-width: 0;
+    max-width: 140px;
+  }
+
+  [data-user-message-bubble="true"] {
+    max-width: 88%;
+  }
+
+  .octopus-chat-scroll > div > div {
+    padding-inline: 10px !important;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1024px) {
+  [data-thread-scroll-footer="true"] {
+    padding-bottom: max(14px, env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  .composer-utility-bar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .composer-utility-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .composer-utility-bar > [role="group"] {
+    overflow: visible;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#101010" />
     <link rel="icon" type="image/png" href="./favicon.png" />
     <title>Octopus</title>
@@ -22,6 +22,9 @@
       #root {
         width: 100%;
         height: 100%;
+        height: 100dvh;
+        height: var(--octopus-viewport-height, 100dvh);
+        overflow: hidden;
       }
 
       html,
