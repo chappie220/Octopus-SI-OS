@@ -132,6 +132,7 @@ async fn forward_interface_activation_arrivals(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    octopus_verifiers::configure_process_memory_allocator();
     let mut args = std::env::args().skip(1);
     let command = args.next();
     if args.next().is_some() {
@@ -706,6 +707,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
             let mut activation_reconciler = interface_activation_reconciler.reconciler;
             activation_reconciler.attach_movement_wakes(movement_wake_rx);
             let activation_reconciler_task = tokio::task::spawn_local(activation_reconciler.run());
+            octopus_verifiers::trim_process_memory();
 
             if cancel.is_cancelled() {
                 let daemon_result = daemon_task.await;

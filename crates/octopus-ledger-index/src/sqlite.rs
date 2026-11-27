@@ -508,16 +508,36 @@ impl LedgerSqliteIndex {
         Ok(1)
     }
 
+    fn bounds_match_watermark(&self, watermark: u64) -> Result<bool, SqliteIndexError> {
+        let min_seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seq FROM movements ORDER BY seq ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let max_seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seq FROM movements ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match watermark {
+            0 => min_seq.is_none() && max_seq.is_none(),
+            w => min_seq == Some(0) && max_seq == Some((w - 1) as i64),
+        })
+    }
+
     pub fn verify_against(&self, log: &(dyn MovementLog + Send)) -> Result<bool, SqliteIndexError> {
         let watermark = self.watermark()?;
         let log_len = log.len() as u64;
         if watermark > log_len {
             return Ok(false);
         }
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM movements", [], |row| row.get(0))?;
-        if count as u64 != watermark {
+        if !self.bounds_match_watermark(watermark)? {
             return Ok(false);
         }
         if !self.durable_prefix_matches(log, watermark, log_len)? {
@@ -554,10 +574,7 @@ impl LedgerSqliteIndex {
         if watermark > log_len {
             return Ok(false);
         }
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM movements", [], |row| row.get(0))?;
-        if count as u64 != watermark {
+        if !self.bounds_match_watermark(watermark)? {
             return Ok(false);
         }
         if !self.durable_prefix_matches(log, watermark, log_len)? {
@@ -763,6 +780,7 @@ impl LedgerSqliteReader {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        conn.pragma_update(None, "query_only", "ON")?;
         let schema_version = required_meta_u64(&conn, "schema_version")?;
         if schema_version != SCHEMA_VERSION as u64 {
             return Err(SqliteIndexError::SchemaGeneration {

@@ -12,7 +12,7 @@ pub(crate) fn load_interface_descriptor(
             path.display()
         )
     })?;
-    let descriptor = parse_strict::<InterfaceDescriptor>(&bytes).map_err(|error| {
+    let mut descriptor = parse_strict::<InterfaceDescriptor>(&bytes).map_err(|error| {
         format!(
             "interface descriptor '{}' is malformed: {error}",
             path.display()
@@ -24,6 +24,18 @@ pub(crate) fn load_interface_descriptor(
             path.display(),
             descriptor.id
         ));
+    }
+    if let Some(base_id) = descriptor.copy_of.clone() {
+        if let Ok(safe_base) = safe_segment(base_id.as_str(), "copy_of interface id") {
+            let base_path = interface_root.join(&safe_base).join("interface.json");
+            if let Ok(base_bytes) = std::fs::read(&base_path) {
+                if let Ok(base) = parse_strict::<InterfaceDescriptor>(&base_bytes) {
+                    if base.id == base_id {
+                        descriptor.inherit_driver_config_from(&base);
+                    }
+                }
+            }
+        }
     }
     Ok(descriptor)
 }
@@ -110,7 +122,7 @@ pub(crate) fn capability_interface_segment(interface: &str) -> String {
 }
 
 pub(crate) fn pretty_json(value: &serde_json::Value) -> Result<String, String> {
-    serde_json::to_string_pretty(value)
+    serde_json::to_string(value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("planned JSON did not encode: {error}"))
 }

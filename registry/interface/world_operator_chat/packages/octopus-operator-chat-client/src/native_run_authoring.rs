@@ -58,6 +58,7 @@ pub(super) fn plan(
         provider_tag,
     )?;
     let mut provider: Value = serde_json::from_str(&writes[provider_index].content).map_err(|error| error.to_string())?;
+    let is_copy_of_base = provider.get("copy_of").and_then(Value::as_str) == Some(context.provider.interface.id.as_str());
     let private = provider.pointer_mut("/interface_driver_config/private_config")
         .and_then(Value::as_object_mut).ok_or("planned provider private_config must be an object")?;
     private.remove("run_affordances");
@@ -107,12 +108,30 @@ pub(super) fn plan(
         "tools":tools,"door_host_slots":context.door_host_slots,"context_artifacts":[],
         "return_interface_ids":[],
     });
-    let Some((affordances, catalog)) = render(&profile, &catalog_id, json!({
+    let Some((mut affordances, catalog)) = render(&profile, &catalog_id, json!({
         "file_write_tool":writer,"file_read_tool":reader,"artifact_send_tool":sender,"roots":roots,"defaults":defaults,
     }), identity.owns_client().then_some(config.interface.as_str()))? else {
         writes[provider_index].content = pretty_json(&provider)?;
         return Ok(None);
     };
+    if is_copy_of_base {
+        if let Some(defaults_obj) = affordances
+            .get_mut("defaults")
+            .and_then(Value::as_object_mut)
+        {
+            if defaults_obj.get("output_selection")
+                == context
+                    .provider
+                    .interface
+                    .interface_driver_config
+                    .as_ref()
+                    .and_then(|cfg| cfg.private_config.get("run_affordance_profile"))
+                    .and_then(|p| p.get("output_selection"))
+            {
+                defaults_obj.remove("output_selection");
+            }
+        }
+    }
     private.insert("run_affordances".into(), affordances);
     writes[provider_index].content = pretty_json(&provider)?;
     push_json_write(context.registry_root.join("artifact").join(&catalog_id).join("artifact.json"),

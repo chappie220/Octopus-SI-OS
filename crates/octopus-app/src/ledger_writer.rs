@@ -168,6 +168,13 @@ impl MovementLog for LedgerWriter {
             .read_from(from)
     }
 
+    fn scan_from(&self, from: Seq, visit: &mut dyn FnMut(Movement) -> ControlFlow<()>) {
+        self.log
+            .lock()
+            .expect("ledger writer mutex is not poisoned")
+            .scan_from(from, visit)
+    }
+
     fn read_at(&self, seq: Seq) -> Option<Movement> {
         self.log
             .lock()

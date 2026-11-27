@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
@@ -991,7 +991,7 @@ fn resolve_interface_descriptor_files(
             descriptor_path.display()
         )
     })?;
-    let descriptor: octopus_interfaces::InterfaceDescriptor =
+    let mut descriptor: octopus_interfaces::InterfaceDescriptor =
         octopus_descriptors::parse_strict(descriptor_bytes).map_err(|error| {
             format!(
                 "interface descriptor '{}' is malformed: {error}",
@@ -1005,6 +1005,25 @@ fn resolve_interface_descriptor_files(
             descriptor.id,
             interface
         ));
+    }
+    let mut own_files = own_files;
+    if let Some(base_id) = descriptor.copy_of.clone() {
+        let base_path = registry_root
+            .join("interface")
+            .join(base_id.as_str())
+            .join("interface.json");
+        if let Ok(base_bytes) = std::fs::read(&base_path) {
+            if let Ok(base_descriptor) =
+                octopus_descriptors::parse_strict::<octopus_interfaces::InterfaceDescriptor>(
+                    &base_bytes,
+                )
+            {
+                if base_descriptor.id == base_id {
+                    descriptor.inherit_driver_config_from(&base_descriptor);
+                    own_files.insert("copy_of_base_interface.json".to_string(), base_bytes);
+                }
+            }
+        }
     }
     Ok(Some(ResolvedInterfaceDescriptorFiles {
         interface_dir,
@@ -1034,17 +1053,21 @@ pub fn resolve_spawn_life_config(
     registry_root: &Path,
     interface: &InterfaceId,
 ) -> Result<Option<ResolvedSpawnLifeConfig>, String> {
-    resolve_spawn_life_config_with_verification(
-        registry_root,
-        interface,
-        &mut ImportedExecutableVerification::default(),
-    )
+    resolve_spawn_life_config_inner(registry_root, interface, None)
 }
 
 pub(crate) fn resolve_spawn_life_config_with_verification(
     registry_root: &Path,
     interface: &InterfaceId,
     verification: &mut ImportedExecutableVerification,
+) -> Result<Option<ResolvedSpawnLifeConfig>, String> {
+    resolve_spawn_life_config_inner(registry_root, interface, Some(verification))
+}
+
+fn resolve_spawn_life_config_inner(
+    registry_root: &Path,
+    interface: &InterfaceId,
+    verification: Option<&mut ImportedExecutableVerification>,
 ) -> Result<Option<ResolvedSpawnLifeConfig>, String> {
     let Some(loaded) = load_spawn_life_config(registry_root, interface)? else {
         return Ok(None);
@@ -1073,7 +1096,7 @@ pub(crate) fn resolve_spawn_life_config_with_verification(
         registry_root,
         &loaded.config,
         ImportedDependencyFingerprint::Content,
-        Some(verification),
+        verification,
     )?;
     Ok(Some(ResolvedSpawnLifeConfig {
         config: loaded.config,
@@ -1175,6 +1198,20 @@ pub(crate) fn resolved_spawn_life_source_fingerprint(
         &registry_root.join("interface").join(interface.as_str()),
         None,
     )?;
+    if let Some(base_id) = resolved.interface_descriptor.copy_of.as_ref() {
+        let base_path = registry_root
+            .join("interface")
+            .join(base_id.as_str())
+            .join("interface.json");
+        if std::fs::symlink_metadata(&base_path).is_ok() {
+            append_path_metadata_fingerprint(
+                &mut material,
+                "copy-of-base-interface",
+                &base_path,
+                false,
+            )?;
+        }
+    }
     let repository_root = registry_root.parent().ok_or_else(|| {
         format!(
             "registry root '{}' has no repository parent",
@@ -1357,7 +1394,7 @@ fn append_path_metadata_fingerprint(
         append_fingerprint_part(material, "file-state", &value.to_le_bytes());
     }
     if read_unsettled && !FileStamp::of(&metadata).is_settled(observed) {
-        let digest = ImportedExecutableVerification::default().digest(path, &metadata)?;
+        let digest = shared_executable_digest(path, &metadata)?;
         append_fingerprint_part(material, "unsettled-content", digest.sha256.as_bytes());
     }
     Ok(())
@@ -1378,7 +1415,7 @@ fn append_life_repository_file_fingerprints(
     for declared in life_repository_files(config) {
         let path = resolve_life_file(&declared, registry_root, interface, repository_root)?;
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-        let digest = ImportedExecutableVerification::default().digest(&path, &metadata)?;
+        let digest = shared_executable_digest(&path, &metadata)?;
         append_fingerprint_part(
             material,
             &format!("repository-file/{declared}"),
@@ -1458,7 +1495,7 @@ fn append_owner_life_dependencies(
         append_path_metadata_fingerprint(material, &declared, &file, !content)?;
         if content {
             let metadata = std::fs::symlink_metadata(&file).map_err(|error| error.to_string())?;
-            let digest = ImportedExecutableVerification::default().digest(&file, &metadata)?;
+            let digest = shared_executable_digest(&file, &metadata)?;
             append_fingerprint_part(material, declared, digest.sha256.as_bytes());
         }
     }
@@ -1635,6 +1672,25 @@ impl ImportedExecutableVerification {
     }
 }
 
+fn shared_executable_verification() -> &'static Mutex<ImportedExecutableVerification> {
+    static SHARED: OnceLock<Mutex<ImportedExecutableVerification>> = OnceLock::new();
+    SHARED.get_or_init(|| Mutex::new(ImportedExecutableVerification::default()))
+}
+
+fn shared_executable_digest(
+    path: &Path,
+    expected: &std::fs::Metadata,
+) -> Result<ExecutableDigest, String> {
+    let mut cache = shared_executable_verification()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    if cache.digests.len() >= 1024 && !cache.digests.contains_key(path) {
+        cache.digests.clear();
+    }
+    cache.digest(path, expected)
+}
+
 fn parse_imported_executable_reference(
     declared_program: &str,
 ) -> Result<Option<(InterfaceId, PathBuf)>, String> {
@@ -1802,9 +1858,10 @@ fn resolve_imported_executable_dependency(
                     build_receipt_path.display()
                 ));
             }
-            let mut local_verification = ImportedExecutableVerification::default();
-            let digest = verification.unwrap_or(&mut local_verification)
-                .digest(&canonical_executable, &executable_metadata)?;
+            let digest = match verification {
+                Some(cache) => cache.digest(&canonical_executable, &executable_metadata)?,
+                None => shared_executable_digest(&canonical_executable, &executable_metadata)?,
+            };
             if receipt.executable_bytes != executable_metadata.len()
                 || receipt.executable_bytes != digest.bytes
             {
@@ -1862,15 +1919,13 @@ fn append_imported_life_dependency_fingerprints(
     registry_root: &Path,
     config: &SpawnLifeConfig,
     fingerprint: ImportedDependencyFingerprint,
-    verification: Option<&mut ImportedExecutableVerification>,
+    mut verification: Option<&mut ImportedExecutableVerification>,
 ) -> Result<(), String> {
-    let mut local_verification = ImportedExecutableVerification::default();
-    let verification = verification.unwrap_or(&mut local_verification);
     for declared in imported_executable_declarations(config) {
         let dependency = resolve_imported_executable_dependency(
             registry_root,
             &declared,
-            Some(&mut *verification),
+            verification.as_deref_mut(),
         )?
         .ok_or_else(|| format!("imported executable declaration '{declared}' is invalid"))?;
         let prefix = format!("interface-import/{}", dependency.source_interface);
@@ -1890,7 +1945,10 @@ fn append_imported_life_dependency_fingerprints(
                     None => {
                         let metadata = std::fs::symlink_metadata(&dependency.executable_path)
                             .map_err(|error| error.to_string())?;
-                        verification.digest(&dependency.executable_path, &metadata)?
+                        match verification.as_deref_mut() {
+                            Some(cache) => cache.digest(&dependency.executable_path, &metadata)?,
+                            None => shared_executable_digest(&dependency.executable_path, &metadata)?,
+                        }
                     }
                 };
                 append_fingerprint_part(material, &executable_name, digest.sha256.as_bytes());
@@ -2921,7 +2979,7 @@ fn validate_retained_delivery_id(delivery_id: &str) -> Result<(), String> {
 }
 
 pub fn spawn_process_life(
-    ctx: InterfaceLiftContext,
+    mut ctx: InterfaceLiftContext,
     config: SpawnLifeConfig,
 ) -> InterfaceLifeFuture {
     Box::pin(async move {
@@ -2958,6 +3016,7 @@ pub fn spawn_process_life(
             .into_iter()
             .flatten()
             .collect::<BTreeSet<_>>();
+        drop(descriptor);
         let private_environment = Arc::new(read_interface_private_environment(
             &ctx,
             &declared_private_environment_names,
@@ -3021,6 +3080,9 @@ pub fn spawn_process_life(
                 .await
             });
         }
+        ctx.descriptor_snapshot = None;
+        drop(private_environment);
+        drop(private_environment_root_slot);
         if processes.is_empty() {
             ctx.cancel.cancelled().await;
             return Ok(());
@@ -3096,7 +3158,7 @@ fn spawned_life_task_error(
 }
 
 fn spawn_process_command_life(
-    ctx: InterfaceLiftContext,
+    mut ctx: InterfaceLiftContext,
     command_config: SpawnLifeCommand,
     private_environment: Arc<BTreeMap<String, String>>,
     private_environment_root_slot: Option<String>,
@@ -3121,6 +3183,12 @@ fn spawn_process_command_life(
                 var_dir.display()
             )
         })?;
+        // Release spawn-only state (resolved interface descriptor, command
+        // env/args, authority config) before awaiting the long-lived child.
+        let (mut child, _prepared_lease, _child_ownership, host_io_limits, started_at) = {
+            let command_config = command_config;
+            let private_environment = private_environment;
+            let private_environment_root_slot = private_environment_root_slot;
         ensure_private_environment_owner_dir(
             &var_dir,
             ctx.interface.as_str(),
@@ -3258,15 +3326,19 @@ fn spawn_process_command_life(
         readable.extend(blobs_dir.iter().cloned());
         readable.extend(movement_metadata_dir.iter().cloned());
         let mut readable_exact = movements_path.iter().cloned().collect::<Vec<_>>();
+        let mut writable_raw_exact = Vec::new();
         if let Some(path) = &ledger_index_path {
             readable_exact.push(path.clone());
             readable_exact.push(path_with_suffix(path, "-wal"));
-            readable_exact.push(path_with_suffix(path, "-shm"));
+            // SQLite WAL-mode readers require read+write+mmap access to the ephemeral -shm
+            // shared-memory lock/index file while keeping the database and -wal strictly read-only.
+            writable_raw_exact.push(path_with_suffix(path, "-shm"));
         }
         let resolved_interface_descriptor = ctx.resolved_interface_descriptor()?;
+        ctx.descriptor_snapshot = None;
         let additional = octopus_interfaces::additional_host_root_paths(&resolved_interface_descriptor, &ctx.root_slots)?;
         let (authority, authority_roots) = octopus_interfaces::expand_host_root_authority(&command_config.authority, &ctx.root_slots, &additional)?;
-        let resolved = authority.resolve(
+        let mut resolved = authority.resolve(
             &executable_base,
             &authority_roots,
             &environment,
@@ -3275,6 +3347,9 @@ fn spawn_process_command_life(
             std::iter::empty(),
             readable_exact,
         )?;
+        if !writable_raw_exact.is_empty() {
+            resolved.authority = resolved.authority.with_writable_raw_exact(writable_raw_exact)?;
+        }
         let host_io_limits = command_config.io_limits;
         host_io_limits.validate()?;
         let interface_host_slots = resolved_interface_descriptor
@@ -3311,7 +3386,7 @@ fn spawn_process_command_life(
         let host_io_limits_json = serde_json::to_string(&host_io_limits)
             .map_err(|error| format!("interface host I/O limits failed to encode: {error}"))?;
         let profile_root = life_profile_root(ctx.var_dir.parent().ok_or("interface life has no private root")?)?;
-        let prepared = resolved.authority.prepare(
+        let mut prepared = resolved.authority.prepare(
             &declared_program,
             &arguments,
             &executable_base,
@@ -3326,6 +3401,9 @@ fn spawn_process_command_life(
             return Err("interface life executable escapes its exact owner before spawn".into());
         }
         let mut command = tokio::process::Command::from(prepared.command());
+        prepared.args.clear();
+        prepared.args.shrink_to_fit();
+        let prepared_environment = std::mem::take(&mut prepared.environment);
         let child_ownership = crate::InterfaceLifeOwnership::try_acquire_life(
             ctx.var_dir.parent().ok_or("interface life has no private root")?, &ctx.interface,
         )?.ok_or("interface process lost its lifetime ownership before spawn")?;
@@ -3372,7 +3450,7 @@ fn spawn_process_command_life(
         }
         command
             .env_clear()
-            .envs(prepared.environment)
+            .envs(prepared_environment)
             .envs(environment)
             .current_dir(&executable_base)
             .env("OCTOPUS_INTERFACE_ID", ctx.interface.as_str())
@@ -3410,11 +3488,13 @@ fn spawn_process_command_life(
             tracing::warn!(error = %error, "life stderr capture retention failed");
             eprintln!("{error}");
         }
-        let mut child = LifeProcess::spawn(&mut command)
+        let child = LifeProcess::spawn(&mut command)
             .await
             .map_err(|e| format!("life spawn '{}' failed: {e}", executable.display()))?;
         #[cfg(unix)]
         drop(inherited_sockets);
+        (child, prepared, child_ownership, host_io_limits, started_at)
+        };
         let child_pid = child.id();
         let capture_sequence = STDERR_CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let stderr_path = var_dir.join(format!(

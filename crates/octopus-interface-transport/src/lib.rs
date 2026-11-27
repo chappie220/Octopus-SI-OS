@@ -237,6 +237,7 @@ struct LiftedInterfaceLife {
     handle: tokio::task::JoinHandle<()>,
     started_at: Instant,
     restart_attempt: u32,
+    coma_exhausted: bool,
     died_at: Option<Instant>,
     retry_not_before: Option<Instant>,
     waking: bool,
@@ -298,9 +299,10 @@ enum InterfaceLifeEvent {
 }
 
 const LIFE_RESTART_BASE_DELAY: Duration = Duration::from_millis(250);
-const LIFE_RESTART_MAX_DELAY: Duration = Duration::from_secs(300);
-const LIFE_RESTART_MAX_DELAY_WITH_WORK: Duration = Duration::from_secs(30);
+const LIFE_RESTART_MAX_DELAY: Duration = Duration::from_secs(1800);
+const LIFE_RESTART_MAX_DELAY_WITH_WORK: Duration = Duration::from_secs(60);
 const LIFE_RESTART_STABLE_AFTER: Duration = Duration::from_secs(600);
+const LIFE_RESTART_MAX_CONSECUTIVE_COMA_ATTEMPTS: u32 = 12;
 const LIFE_WAKING_SLOT: Duration = Duration::from_secs(30);
 const INTERFACE_WATCH_EVENT_BATCH_LIMIT: usize = 256;
 
@@ -630,10 +632,11 @@ impl InterfaceActivationReconciler {
                 .map(|lifted| {
                     !lifted.sleeping
                         && (fingerprint_changed
-                            || (lifted.ended || lifted.handle.is_finished())
+                            || (!lifted.coma_exhausted
+                                && (lifted.ended || lifted.handle.is_finished())
                                 && lifted
                                     .retry_not_before
-                                    .is_none_or(|not_before| Instant::now() >= not_before))
+                                    .is_none_or(|not_before| Instant::now() >= not_before)))
                 })
                 .unwrap_or(true);
             if !restart {
@@ -764,6 +767,7 @@ impl InterfaceActivationReconciler {
                     handle,
                     started_at: Instant::now(),
                     restart_attempt,
+                    coma_exhausted: false,
                     died_at: None,
                     retry_not_before: None,
                     waking: true,
@@ -835,6 +839,17 @@ impl InterfaceActivationReconciler {
             lifted.restart_attempt = 0;
         }
         lifted.restart_attempt = lifted.restart_attempt.saturating_add(1);
+        if lifted.restart_attempt > LIFE_RESTART_MAX_CONSECUTIVE_COMA_ATTEMPTS {
+            lifted.coma_exhausted = true;
+            lifted.died_at = Some(Instant::now());
+            lifted.retry_not_before = None;
+            eprintln!(
+                "interface '{}' paused automatic coma retries after {} consecutive failures; will retry on descriptor change or new movement",
+                interface.as_str(),
+                lifted.restart_attempt.saturating_sub(1),
+            );
+            return;
+        }
         let delay = interface_life_restart_delay(lifted.restart_attempt);
         let died_at = Instant::now();
         lifted.died_at = Some(died_at);
@@ -983,6 +998,7 @@ impl InterfaceActivationReconciler {
                 let was_waking = std::mem::replace(&mut current.waking, false);
                 match &outcome {
                     Ok(()) => {
+                        current.coma_exhausted = false;
                         if self.clear_failure(&interface) && self.live {
                             eprintln!("interface '{}' woke from coma", interface.as_str());
                         }
@@ -1013,6 +1029,7 @@ impl InterfaceActivationReconciler {
                 current.sleeping = true;
                 current.asleep_through = declaration.through_seq;
                 current.restart_attempt = 0;
+                current.coma_exhausted = false;
                 current.retry_not_before = None;
                 #[cfg(unix)]
                 let held = declaration
@@ -1129,6 +1146,19 @@ impl InterfaceActivationReconciler {
             if life.asleep_through.is_some_and(|through| seq >= through) {
                 self.wake_life(&interface).await;
             }
+            return;
+        }
+        if life.coma_exhausted {
+            let died_at = life.died_at.unwrap_or_else(Instant::now);
+            let sooner = died_at + LIFE_RESTART_MAX_DELAY_WITH_WORK;
+            life.coma_exhausted = false;
+            life.retry_not_before = Some(sooner);
+            let lift_id = life.lift_id;
+            let event_tx = self.life_exit_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep_until(sooner.into()).await;
+                let _ = event_tx.send(InterfaceLifeEvent::Retry { interface, lift_id });
+            });
             return;
         }
         let (Some(died_at), Some(not_before)) = (life.died_at, life.retry_not_before) else {
@@ -2343,7 +2373,7 @@ mod interface_life_switch_tests {
     fn repeated_interface_life_failure_uses_bounded_backoff() {
         assert_eq!(interface_life_restart_delay(1), Duration::from_millis(250));
         assert_eq!(interface_life_restart_delay(2), Duration::from_millis(500));
-        assert_eq!(interface_life_restart_delay(32), Duration::from_secs(300));
+        assert_eq!(interface_life_restart_delay(32), Duration::from_secs(1800));
     }
 
     #[test]
@@ -2442,6 +2472,7 @@ mod interface_life_switch_tests {
                     handle,
                     started_at: Instant::now(),
                     restart_attempt: 0,
+                    coma_exhausted: false,
                     died_at: None,
                     retry_not_before: None,
                     waking: true,

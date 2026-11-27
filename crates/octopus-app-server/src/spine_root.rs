@@ -47,9 +47,14 @@ use crate::registry_reference_graph::{
 mod commit;
 
 type LoadedInterfaces = Arc<Vec<(DescriptorName, Arc<InterfaceDescriptor>)>>;
+type LoadedTools = Arc<Vec<(DescriptorName, Arc<ToolDescriptor>)>>;
 
 fn share_interfaces(interfaces: Vec<(DescriptorName, InterfaceDescriptor)>) -> LoadedInterfaces {
     Arc::new(interfaces.into_iter().map(|(name, descriptor)| (name, Arc::new(descriptor))).collect())
+}
+
+fn share_tools(tools: Vec<(DescriptorName, ToolDescriptor)>) -> LoadedTools {
+    Arc::new(tools.into_iter().map(|(name, descriptor)| (name, Arc::new(descriptor))).collect())
 }
 
 #[derive(Clone, Debug)]
@@ -722,7 +727,7 @@ impl LoadedRegistrySnapshot {
         mut interface_sources: BTreeMap<InterfaceId, InterfaceFormationSource>,
         interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
         worker_interface_policies: Arc<BTreeMap<InterfaceId, WorkerInterfacePolicy>>,
-        tool_descriptors_loaded: Vec<(DescriptorName, ToolDescriptor)>,
+        tool_descriptors_loaded: LoadedTools,
         worker_environment_kinds_loaded: Vec<(DescriptorName, WorkerEnvKindSpec)>,
         reference_graph: RegistryReferenceGraph,
         ee_tree: EeTree,
@@ -757,10 +762,10 @@ impl LoadedRegistrySnapshot {
                 copy_lineage.insert_interface(descriptor.id.clone(), original.clone());
             }
         }
-        for (_, descriptor) in &tool_descriptors_loaded {
+        for (_, descriptor) in tool_descriptors_loaded.iter() {
             let Some(original) = &descriptor.copy_of else { continue };
             let original = ToolId::new(original.as_str());
-            if tool_descriptions.by_tool.get(&original).is_some_and(|known| descriptor.never_wider_than(known)) {
+            if tool_descriptions.by_tool.get(&original).is_some_and(|known| descriptor.never_wider_than(known.as_ref())) {
                 copy_lineage.insert_tool(ToolId::new(descriptor.id.as_str()), original);
             } else {
                 copy_lineage.insert_declared_tool(ToolId::new(descriptor.id.as_str()), original);
@@ -842,7 +847,7 @@ impl LoadedRegistrySnapshot {
             FormationSource::Interface(id) => encode_formation_source(name, self.interfaces_by_id.get(id).ok_or_else(missing)?.as_ref()),
             FormationSource::ConfiguredInterface(source) => source.read(),
             FormationSource::Worker(id) => encode_formation_source(name, self.worker_interface_policies.get(id).ok_or_else(missing)?),
-            FormationSource::Tool(id) => encode_formation_source(name, self.tool_descriptions.by_tool.get(id).ok_or_else(missing)?),
+            FormationSource::Tool(id) => encode_formation_source(name, self.tool_descriptions.by_tool.get(id).ok_or_else(missing)?.as_ref()),
             FormationSource::EnvironmentKind(descriptor) => encode_formation_source(name, descriptor.as_ref()),
             FormationSource::EeTemplate(descriptor) => encode_formation_source(name, descriptor.as_ref()),
         }
@@ -1210,7 +1215,7 @@ impl LoadedRegistrySnapshot {
             packages.interface_sources,
             packages.interface_dispositions,
             Arc::new(packages.worker_policies),
-            packages.tools,
+            share_tools(packages.tools),
             packages.worker_environment_kinds,
             packages.graph,
             ee_tree,
@@ -1444,15 +1449,15 @@ fn form_interface_policy_for_interface(
 
 #[derive(Clone, Debug, Default)]
 struct RegistryToolDescriptions {
-    by_tool: BTreeMap<ToolId, ToolDescriptor>,
+    by_tool: BTreeMap<ToolId, Arc<ToolDescriptor>>,
 }
 
 impl RegistryToolDescriptions {
-    fn from_loaded(loaded: &[(DescriptorName, ToolDescriptor)]) -> Self {
+    fn from_loaded(loaded: &LoadedTools) -> Self {
         Self {
             by_tool: loaded
                 .iter()
-                .map(|(_, descriptor)| (ToolId::new(descriptor.id.as_str()), descriptor.clone()))
+                .map(|(_, descriptor)| (ToolId::new(descriptor.id.as_str()), Arc::clone(descriptor)))
                 .collect(),
         }
     }
@@ -1653,7 +1658,7 @@ pub struct EmbeddedRuntime {
     pub interfaces_loaded: LoadedInterfaces,
     pub worker_interface_policies: Arc<BTreeMap<InterfaceId, WorkerInterfacePolicy>>,
     pub ee_templates_loaded: Vec<(octopus_descriptors::DescriptorName, EeTemplateDescriptor)>,
-    pub tool_descriptors_loaded: Vec<(octopus_descriptors::DescriptorName, ToolDescriptor)>,
+    pub tool_descriptors_loaded: LoadedTools,
     live_registry: Arc<RwLock<LoadedRegistrySnapshot>>,
     registry_fingerprint: Arc<Mutex<Option<RegistryDescriptorFingerprint>>>,
     registry_files: Arc<Mutex<RegistryFileCache>>,
@@ -2060,10 +2065,11 @@ pub async fn build_embedded_spine_with_progress(
         eprintln!("EE instance isolation warning: {issue}");
     }
     let interfaces_loaded = share_interfaces(packages.interfaces);
-    let interface_dispositions = packages.interface_dispositions.clone();
+    let interface_dispositions = packages.interface_dispositions;
     let worker_interface_policies = Arc::new(packages.worker_policies);
-    let tool_descriptors_loaded = packages.tools.clone();
-    let ee_templates_loaded = packages.ee_templates.clone();
+    let tool_descriptors_loaded = share_tools(packages.tools);
+    let ee_templates_loaded = packages.ee_templates;
+    drop(packages.activations);
     let interface_catalog = RuntimeInterfaceCatalog::from_classes(
         interfaces_loaded
             .iter()
@@ -2156,7 +2162,7 @@ pub async fn build_embedded_spine_with_progress(
         blobs: config.blobs.clone(),
         interfaces_loaded,
         worker_interface_policies,
-        ee_templates_loaded: ee_templates_loaded.clone(),
+        ee_templates_loaded,
         tool_descriptors_loaded,
         live_registry,
         registry_fingerprint,

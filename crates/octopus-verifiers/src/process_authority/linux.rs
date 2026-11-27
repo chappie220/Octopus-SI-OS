@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 
 pub const CONTROL_SOCKET: &str = "/run/octopus-process-authority/control.sock";
 pub const PLATFORM_EXECUTABLE: &str = "/usr/libexec/octopus/octopus-linux-process-authority";
-pub const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
+pub const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,17 +129,18 @@ pub fn prepare_room(
     for root in roots {
         policy.add_path(root, FileAccess::Execute, false)?;
     }
+    policy.deduplicate_files();
     prepared(policy, executable, args)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileRule {
     pub selector: FileSelector,
     pub access: FileAccess,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileSelector {
     Exact {
@@ -151,12 +152,14 @@ pub enum FileSelector {
     },
     Names {
         directory: PathBuf,
+        #[serde(with = "os_string_wire")]
         prefix: OsString,
+        #[serde(with = "os_string_wire")]
         suffix: OsString,
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileAccess {
     Read,
@@ -165,6 +168,38 @@ pub enum FileAccess {
     Map,
     CreateDirectory,
     CreatePrivateDirectory,
+}
+
+mod os_string_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ffi::OsString;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireOsString {
+        Utf8(String),
+        Raw(OsString),
+    }
+
+    pub fn serialize<S>(value: &OsString, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value.to_str() {
+            Some(text) => serializer.serialize_str(text),
+            None => value.serialize(serializer),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<OsString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match WireOsString::deserialize(deserializer)? {
+            WireOsString::Utf8(text) => Ok(OsString::from(text)),
+            WireOsString::Raw(raw) => Ok(raw),
+        }
+    }
 }
 
 pub(super) fn prepare(
@@ -193,6 +228,7 @@ fn project(authority: &ProcessAuthority, executable: &Path) -> Result<LinuxProce
         (&authority.executable, FileAccess::Execute, false),
         (&authority.readable_exact, FileAccess::Read, true),
         (&authority.writable_exact, FileAccess::Write, true),
+        (&authority.writable_raw_exact, FileAccess::Write, true),
         (&authority.executable_exact, FileAccess::Execute, true),
     ] {
         for path in paths {
@@ -293,6 +329,7 @@ fn project(authority: &ProcessAuthority, executable: &Path) -> Result<LinuxProce
             }
         }
     }
+    policy.deduplicate_files();
     Ok(policy)
 }
 
@@ -313,6 +350,10 @@ fn prepared(
 }
 
 impl LinuxProcessPolicy {
+    fn deduplicate_files(&mut self) {
+        let mut seen = std::collections::HashSet::with_capacity(self.files.len());
+        self.files.retain(|rule| seen.insert(rule.clone()));
+    }
     fn add_path(&mut self, path: PathBuf, access: FileAccess, exact: bool) -> Result<(), String> {
         let directory = match std::fs::metadata(&path) {
             Ok(metadata) => metadata.is_dir(),
@@ -415,6 +456,15 @@ impl LinuxProcessPolicy {
         {
             return Err("AppArmor profile has an invalid identity".into());
         }
+        const PUBLICATION_DFA_COALESCE_THRESHOLD: usize = 12;
+        let coalesce_publication = self
+            .files
+            .iter()
+            .filter(|rule| matches!(rule.selector, FileSelector::Names { .. }))
+            .count()
+            > PUBLICATION_DFA_COALESCE_THRESHOLD;
+        let mut coalesced_publication: BTreeMap<(PathBuf, FileAccess), BTreeSet<String>> =
+            BTreeMap::new();
         let mut lines = BTreeSet::new();
         for rule in &self.files {
             let permissions = match rule.access {
@@ -435,9 +485,36 @@ impl LinuxProcessPolicy {
                     "rk"
                 }
             };
+            if coalesce_publication && matches!(rule.access, FileAccess::Read | FileAccess::Write) {
+                if let Some((directory, suffix)) = publication_coalesce_key(&rule.selector)? {
+                    // Preserve full selector validation even when coalescing the compiled DFA pattern.
+                    let _ = rule.selector.patterns()?;
+                    coalesced_publication
+                        .entry((directory, rule.access))
+                        .or_default()
+                        .insert(suffix);
+                    continue;
+                }
+            }
             for pattern in rule.selector.patterns()? {
                 lines.insert(format!("  \"{pattern}\" {permissions},\n"));
             }
+        }
+        for ((directory, access), suffixes) in coalesced_publication {
+            let permissions = match access {
+                FileAccess::Read => "rk",
+                FileAccess::Write => "rwkl",
+                _ => continue,
+            };
+            let directory = literal_path(&directory)?;
+            let stem = directory.trim_end_matches('/');
+            let pattern = if suffixes.len() == 1 {
+                format!("{stem}/*{}", suffixes.iter().next().unwrap())
+            } else {
+                let joined = suffixes.into_iter().collect::<Vec<_>>().join(",");
+                format!("{stem}/*{{{joined}}}")
+            };
+            lines.insert(format!("  \"{pattern}\" {permissions},\n"));
         }
         let mut profile = format!(
             "abi <abi/4.0>,\nprofile {name} flags=(mediate_deleted) {{\n  signal (receive),\n  signal (send) peer={name},\n  signal (send) peer={name}//&unconfined,\n  ptrace (read, trace) peer={name},\n  ptrace (read, trace) peer={name}//&unconfined,\n  ptrace (readby, tracedby),\n"
@@ -554,6 +631,54 @@ impl FileSelector {
     }
 }
 
+fn publication_coalesce_key(selector: &FileSelector) -> Result<Option<(PathBuf, String)>, String> {
+    const COORDINATION_DIR: &str = ".octopus-publication";
+    const COORDINATION_SUFFIXES: &[&str] = &[
+        ".lock",
+        ".pending",
+        ".install",
+        ".directory",
+        ".reclaim",
+        ".plan",
+        ".bytes",
+        ".preimage",
+        ".receipt",
+        ".tmp",
+    ];
+    match selector {
+        FileSelector::Names {
+            directory, suffix, ..
+        } if directory.file_name() == Some(OsStr::new(COORDINATION_DIR)) => {
+            let escaped = literal(suffix)?;
+            if escaped.contains(',') {
+                return Ok(None);
+            }
+            Ok(Some((directory.clone(), escaped)))
+        }
+        FileSelector::Exact {
+            path,
+            directory: false,
+        } => {
+            let Some(parent) = path.parent() else {
+                return Ok(None);
+            };
+            if parent.file_name() != Some(OsStr::new(COORDINATION_DIR)) {
+                return Ok(None);
+            }
+            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                return Ok(None);
+            };
+            for &ext in COORDINATION_SUFFIXES {
+                if name.ends_with(ext) && name.len() > ext.len() {
+                    return Ok(Some((parent.to_path_buf(), ext.to_string())));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn literal_path(path: &Path) -> Result<String, String> {
     if !path.is_absolute()
         || path
@@ -582,16 +707,240 @@ fn literal(value: &OsStr) -> Result<String, String> {
     Ok(escaped)
 }
 
+fn read_prefix(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
+}
+
+fn read_u16_endian(bytes: &[u8], little_endian: bool) -> u16 {
+    let array: [u8; 2] = [bytes[0], bytes[1]];
+    if little_endian {
+        u16::from_le_bytes(array)
+    } else {
+        u16::from_be_bytes(array)
+    }
+}
+
+fn read_u32_endian(bytes: &[u8], little_endian: bool) -> u32 {
+    let array: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
+    if little_endian {
+        u32::from_le_bytes(array)
+    } else {
+        u32::from_be_bytes(array)
+    }
+}
+
+fn read_u64_endian(bytes: &[u8], little_endian: bool) -> u64 {
+    let array: [u8; 8] = [
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ];
+    if little_endian {
+        u64::from_le_bytes(array)
+    } else {
+        u64::from_be_bytes(array)
+    }
+}
+
+fn elf_interpreter(file: &mut std::fs::File, header: &[u8], path: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const ELFCLASS32: u8 = 1;
+    const ELFCLASS64: u8 = 2;
+    const ELFDATA2LSB: u8 = 1;
+    const ELFDATA2MSB: u8 = 2;
+    const PT_INTERP: u32 = 3;
+    const PN_XNUM: usize = 0xffff;
+    const MAX_PHDR_TABLE_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_INTERP_BYTES: usize = 4096;
+
+    if header.len() < 16 {
+        return Err(format!(
+            "Linux executable '{}' is invalid: truncated ELF header",
+            path.display()
+        ));
+    }
+    let little_endian = match header[5] {
+        ELFDATA2LSB => true,
+        ELFDATA2MSB => false,
+        other => {
+            return Err(format!(
+                "Linux executable '{}' is invalid: unsupported ELF endianness {other}",
+                path.display()
+            ));
+        }
+    };
+    let (is_64, phoff, phentsize, mut phnum, min_phentsize, shoff, shentsize) = match header[4] {
+        ELFCLASS32 => {
+            if header.len() < 52 {
+                return Err(format!(
+                    "Linux executable '{}' is invalid: truncated ELF32 header",
+                    path.display()
+                ));
+            }
+            (
+                false,
+                u64::from(read_u32_endian(&header[28..32], little_endian)),
+                usize::from(read_u16_endian(&header[42..44], little_endian)),
+                usize::from(read_u16_endian(&header[44..46], little_endian)),
+                32usize,
+                u64::from(read_u32_endian(&header[32..36], little_endian)),
+                usize::from(read_u16_endian(&header[46..48], little_endian)),
+            )
+        }
+        ELFCLASS64 => {
+            if header.len() < 64 {
+                return Err(format!(
+                    "Linux executable '{}' is invalid: truncated ELF64 header",
+                    path.display()
+                ));
+            }
+            (
+                true,
+                read_u64_endian(&header[32..40], little_endian),
+                usize::from(read_u16_endian(&header[54..56], little_endian)),
+                usize::from(read_u16_endian(&header[56..58], little_endian)),
+                56usize,
+                read_u64_endian(&header[40..48], little_endian),
+                usize::from(read_u16_endian(&header[58..60], little_endian)),
+            )
+        }
+        other => {
+            return Err(format!(
+                "Linux executable '{}' is invalid: unsupported ELF class {other}",
+                path.display()
+            ));
+        }
+    };
+
+    if phnum == PN_XNUM && shoff != 0 {
+        let min_shentsize = if is_64 { 64usize } else { 40usize };
+        if shentsize < min_shentsize {
+            return Err(format!(
+                "Linux executable '{}' is invalid: invalid ELF section header entry size",
+                path.display()
+            ));
+        }
+        let mut sh0 = vec![0u8; min_shentsize];
+        file.seek(SeekFrom::Start(shoff))
+            .and_then(|_| file.read_exact(&mut sh0))
+            .map_err(|error| {
+                format!(
+                    "Linux executable '{}' is invalid: cannot read ELF section header 0: {error}",
+                    path.display()
+                )
+            })?;
+        let sh_info = if is_64 {
+            read_u32_endian(&sh0[44..48], little_endian)
+        } else {
+            read_u32_endian(&sh0[28..32], little_endian)
+        };
+        phnum = usize::try_from(sh_info).map_err(|_| {
+            format!(
+                "Linux executable '{}' is invalid: ELF program header count overflow",
+                path.display()
+            )
+        })?;
+    }
+
+    if phnum == 0 {
+        return Ok(None);
+    }
+    if phentsize < min_phentsize {
+        return Err(format!(
+            "Linux executable '{}' is invalid: program header entry size {phentsize} is too small",
+            path.display()
+        ));
+    }
+    let table_len = phentsize
+        .checked_mul(phnum)
+        .filter(|&len| len <= MAX_PHDR_TABLE_BYTES)
+        .ok_or_else(|| {
+            format!(
+                "Linux executable '{}' is invalid: ELF program header table exceeds bounds",
+                path.display()
+            )
+        })?;
+    let mut phdrs = vec![0u8; table_len];
+    file.seek(SeekFrom::Start(phoff))
+        .and_then(|_| file.read_exact(&mut phdrs))
+        .map_err(|error| {
+            format!(
+                "Linux executable '{}' is invalid: cannot read ELF program headers: {error}",
+                path.display()
+            )
+        })?;
+
+    let mut interp_segment: Option<(u64, usize)> = None;
+    for entry in phdrs.chunks_exact(phentsize) {
+        let p_type = read_u32_endian(&entry[0..4], little_endian);
+        if p_type != PT_INTERP {
+            continue;
+        }
+        if interp_segment.is_some() {
+            return Err("Linux executable declares several interpreters".into());
+        }
+        let (p_offset, p_filesz) = if is_64 {
+            (
+                read_u64_endian(&entry[8..16], little_endian),
+                read_u64_endian(&entry[32..40], little_endian),
+            )
+        } else {
+            (
+                u64::from(read_u32_endian(&entry[4..8], little_endian)),
+                u64::from(read_u32_endian(&entry[16..20], little_endian)),
+            )
+        };
+        let p_filesz = usize::try_from(p_filesz)
+            .ok()
+            .filter(|&size| size > 0 && size <= MAX_INTERP_BYTES)
+            .ok_or_else(|| {
+                "Linux executable interpreter is invalid: PT_INTERP size out of bounds".to_string()
+            })?;
+        interp_segment = Some((p_offset, p_filesz));
+    }
+
+    let Some((offset, size)) = interp_segment else {
+        return Ok(None);
+    };
+    let mut raw = vec![0u8; size];
+    file.seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read_exact(&mut raw))
+        .map_err(|error| format!("Linux executable interpreter is invalid: {error}"))?;
+    if let Some(nul) = raw.iter().position(|byte| *byte == 0) {
+        raw.truncate(nul);
+    }
+    if raw.is_empty() {
+        return Err("Linux executable interpreter is invalid: empty PT_INTERP".into());
+    }
+    Ok(Some(raw))
+}
+
 fn executable_interpreter(path: &Path) -> Result<Option<PathBuf>, String> {
-    use object::read::elf::ProgramHeader;
-    let bytes = std::fs::read(path).map_err(|error| {
+    let mut file = std::fs::File::open(path).map_err(|error| {
         format!(
             "Linux executable '{}' cannot be read: {error}",
             path.display()
         )
     })?;
-    let interpreter = if bytes.starts_with(b"#!") {
-        bytes[2..]
+    let mut header = [0u8; 4096];
+    let read_len = read_prefix(&mut file, &mut header).map_err(|error| {
+        format!(
+            "Linux executable '{}' cannot be read: {error}",
+            path.display()
+        )
+    })?;
+    let prefix = &header[..read_len];
+    let interpreter = if prefix.starts_with(b"#!") {
+        prefix[2..]
             .split(|byte| *byte == b'\n')
             .next()
             .unwrap_or_default()
@@ -599,37 +948,16 @@ fn executable_interpreter(path: &Path) -> Result<Option<PathBuf>, String> {
             .find(|part| !part.is_empty())
             .ok_or("Linux script has an empty interpreter")?
             .to_vec()
-    } else {
-        let file = object::File::parse(bytes.as_slice()).map_err(|error| {
-            format!("Linux executable '{}' is invalid: {error}", path.display())
-        })?;
-        let interpreter = match file {
-            object::File::Elf32(file) => file
-                .elf_program_headers()
-                .iter()
-                .map(|segment| segment.interpreter(file.endian(), bytes.as_slice()))
-                .collect::<Result<Vec<_>, _>>(),
-            object::File::Elf64(file) => file
-                .elf_program_headers()
-                .iter()
-                .map(|segment| segment.interpreter(file.endian(), bytes.as_slice()))
-                .collect::<Result<Vec<_>, _>>(),
-            _ => {
-                return Err(format!(
-                    "Linux executable '{}' is not ELF or a script",
-                    path.display()
-                ))
-            }
-        }
-        .map_err(|error| format!("Linux executable interpreter is invalid: {error}"))?;
-        let mut interpreters = interpreter.into_iter().flatten();
-        let Some(interpreter) = interpreters.next() else {
+    } else if prefix.starts_with(b"\x7fELF") {
+        let Some(interpreter) = elf_interpreter(&mut file, prefix, path)? else {
             return Ok(None);
         };
-        if interpreters.next().is_some() {
-            return Err("Linux executable declares several interpreters".into());
-        }
-        interpreter.to_vec()
+        interpreter
+    } else {
+        return Err(format!(
+            "Linux executable '{}' is not ELF or a script",
+            path.display()
+        ));
     };
     let interpreter = PathBuf::from(OsStr::from_bytes(&interpreter));
     if !interpreter.is_absolute() {
@@ -815,5 +1143,211 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn executable_interpreter_handles_elf_and_shebang_without_full_read() {
+        let current = std::env::current_exe().unwrap();
+        let current_interp = executable_interpreter(&current).unwrap();
+        if let Some(interp) = current_interp {
+            assert!(interp.is_absolute(), "{interp:?}");
+            assert!(interp.is_file(), "{interp:?}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run.sh");
+        std::fs::write(&script, b"#! /bin/sh\necho ok\n").unwrap();
+        let expected_sh = normalize_existing_path(PathBuf::from("/bin/sh")).unwrap();
+        assert_eq!(executable_interpreter(&script).unwrap(), Some(expected_sh));
+
+        let non_elf = dir.path().join("plain.txt");
+        std::fs::write(&non_elf, b"not an executable\n").unwrap();
+        assert!(executable_interpreter(&non_elf)
+            .unwrap_err()
+            .contains("is not ELF or a script"));
+
+        let truncated_elf = dir.path().join("truncated.elf");
+        std::fs::write(&truncated_elf, b"\x7fELF\x02\x01").unwrap();
+        assert!(executable_interpreter(&truncated_elf)
+            .unwrap_err()
+            .contains("truncated ELF header"));
+    }
+
+    #[test]
+    fn file_selector_names_uses_compact_utf8_strings_and_accepts_legacy_wire_format() {
+        let hex_prefix = "a".repeat(64);
+        let selector = FileSelector::Names {
+            directory: PathBuf::from("/tmp/octopus-pub"),
+            prefix: OsString::from(&hex_prefix),
+            suffix: OsString::from(".tmp"),
+        };
+        let encoded = serde_json::to_string(&selector).unwrap();
+        assert!(
+            encoded.contains(&format!("\"prefix\":\"{hex_prefix}\"")),
+            "expected compact UTF-8 prefix string, got: {encoded}"
+        );
+        assert!(
+            encoded.contains("\"suffix\":\".tmp\""),
+            "expected compact UTF-8 suffix string, got: {encoded}"
+        );
+        assert!(
+            !encoded.contains("\"Unix\":["),
+            "UTF-8 OsString must not serialize as byte integer array: {encoded}"
+        );
+        let decoded: FileSelector = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, selector);
+
+        let legacy_json = r#"{"scope":"names","directory":"/tmp/octopus-pub","prefix":{"Unix":[97,98,99]},"suffix":{"Unix":[46,116,109,112]}}"#;
+        let legacy_decoded: FileSelector = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            legacy_decoded,
+            FileSelector::Names {
+                directory: PathBuf::from("/tmp/octopus-pub"),
+                prefix: OsString::from("abc"),
+                suffix: OsString::from(".tmp"),
+            }
+        );
+
+        let raw_selector = FileSelector::Names {
+            directory: PathBuf::from("/tmp/octopus-pub"),
+            prefix: OsStr::from_bytes(b"bad-\xff-\xfe").to_os_string(),
+            suffix: OsString::from(".tmp"),
+        };
+        let raw_encoded = serde_json::to_string(&raw_selector).unwrap();
+        let raw_decoded: FileSelector = serde_json::from_str(&raw_encoded).unwrap();
+        assert_eq!(raw_decoded, raw_selector);
+    }
+
+    #[test]
+    fn project_deduplicates_files_and_keeps_81_file_batch_well_under_transport_limit() {
+        assert_eq!(MAX_REQUEST_BYTES, 4 * 1024 * 1024);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut writable_exact = BTreeSet::new();
+        for index in 0..81 {
+            let file = root
+                .join("registry")
+                .join("run_record")
+                .join("run_operator_chat_batch_test")
+                .join(format!("item_{index:02}"))
+                .join("descriptor.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            writable_exact.insert(file);
+        }
+        let executable = normalize_existing_path(PathBuf::from("/bin/sh")).unwrap();
+        let authority = ProcessAuthority {
+            sandbox_mode: octopus_descriptors::ProcessSandboxMode::Enforced,
+            readable: BTreeSet::from([root.clone()]),
+            writable: BTreeSet::new(),
+            executable: BTreeSet::new(),
+            readable_exact: BTreeSet::new(),
+            writable_exact,
+            writable_raw_exact: BTreeSet::new(),
+            executable_exact: BTreeSet::from([executable.clone()]),
+            executable_links: BTreeSet::new(),
+            allow_network: false,
+            allow_local_ipc: false,
+            allow_application_launch: false,
+            allow_sandbox_delegation: false,
+            allow_process_signals: false,
+        };
+        let policy = project(&authority, &executable).unwrap();
+        let unique: std::collections::HashSet<&FileRule> = policy.files.iter().collect();
+        assert_eq!(
+            unique.len(),
+            policy.files.len(),
+            "projected policy.files must be deduplicated"
+        );
+        assert!(
+            policy
+                .files
+                .iter()
+                .any(|rule| matches!(rule.selector, FileSelector::Names { .. })),
+            "expected FileSelector::Names rules from file publication access"
+        );
+        let payload = serde_json::to_vec(&policy).unwrap();
+        let payload_text = String::from_utf8(payload.clone()).unwrap();
+        assert!(
+            !payload_text.contains("\"Unix\":["),
+            "serialized policy should not contain Unix byte-array OsStrings"
+        );
+        eprintln!(
+            "P0-2 81-file batch policy: rules={}, payload_bytes={}",
+            policy.files.len(),
+            payload.len()
+        );
+        assert!(
+            (payload.len() as u64) < 300 * 1024,
+            "expected compact deduplicated 81-file policy well under 300 KiB, got {} bytes",
+            payload.len()
+        );
+        let profile_text = policy
+            .apparmor_profile(
+                &format!("octopus-1000-{}", "c".repeat(64)),
+                1000,
+                UnixSocketMediation::FamilyAndType,
+            )
+            .unwrap();
+        assert!(
+            profile_text.contains(".octopus-publication/*{"),
+            "expected coalesced .octopus-publication AppArmor rules for 81-file batch"
+        );
+        assert!(
+            profile_text.len() < 40 * 1024,
+            "expected compact coalesced AppArmor profile text, got {} bytes",
+            profile_text.len()
+        );
+    }
+
+    #[test]
+    fn writable_raw_exact_grants_rwkl_without_publication_or_directory_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let db = root.join("ledger-index.sqlite");
+        let wal = root.join("ledger-index.sqlite-wal");
+        let shm = root.join("ledger-index.sqlite-shm");
+        std::fs::write(&db, b"").unwrap();
+        std::fs::write(&wal, b"").unwrap();
+        std::fs::write(&shm, b"").unwrap();
+        let executable = normalize_existing_path(PathBuf::from("/bin/sh")).unwrap();
+        let authority = ProcessAuthority::resolve(
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            vec![db.clone(), wal.clone()],
+            Vec::<PathBuf>::new(),
+            vec![executable.clone()],
+            false,
+            false,
+            false,
+            false,
+            false,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        )
+        .unwrap()
+        .with_writable_raw_exact([shm.clone()])
+        .unwrap();
+        let policy = project(&authority, &executable).unwrap();
+        let profile_text = policy
+            .apparmor_profile(
+                &format!("octopus-1000-{}", "d".repeat(64)),
+                1000,
+                UnixSocketMediation::FamilyAndType,
+            )
+            .unwrap();
+        assert!(profile_text.contains(&format!("  \"{}\" rk,\n", db.display())));
+        assert!(profile_text.contains(&format!("  \"{}\" rk,\n", wal.display())));
+        assert!(profile_text.contains(&format!("  \"{}\" rwkl,\n", shm.display())));
+        assert!(
+            !profile_text.contains(".octopus-publication"),
+            "writable_raw_exact must not generate publication coordination rules: {profile_text}"
+        );
+        assert!(
+            !policy.files.iter().any(|rule| matches!(
+                rule.access,
+                FileAccess::CreateDirectory | FileAccess::CreatePrivateDirectory
+            )),
+            "writable_raw_exact must not generate CreateDirectory rules"
+        );
     }
 }

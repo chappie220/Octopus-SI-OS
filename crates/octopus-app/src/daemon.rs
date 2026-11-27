@@ -548,6 +548,7 @@ pub(crate) async fn run_daemon_on_dirs(
             ee_scopes: resumed.ee_tree.len(),
         },
     );
+    octopus_verifiers::trim_process_memory();
     if cancel.is_cancelled() {
         return Ok(());
     }

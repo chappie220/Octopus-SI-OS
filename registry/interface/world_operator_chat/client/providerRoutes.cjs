@@ -8,7 +8,7 @@ const { resolveRunRecordsRoot } = require("./operatorMessages.cjs");
 const { providerAccountArtifactCoordinates, resolveProviderAccountArtifact } = require("./providerObservations.cjs");
 const { readConfig } = require("./roots.cjs");
 const { canonicalJson } = require("./topologyPlan.cjs");
-const { boundedPositiveInteger, contentHashHex, exactArrivalRuntime, integerAtLeast, isObject, nonNegativeInteger, readJsonDocumentIfPresent, readJsonIfPresent, requiredArray, requiredObject, requiredString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
+const { boundedPositiveInteger, contentHashHex, exactArrivalRuntime, hydrateInterfaceDescriptorFromRegistry, integerAtLeast, isObject, nonNegativeInteger, readJsonDocumentIfPresent, readJsonIfPresent, requiredArray, requiredObject, requiredString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
 
 function providerAccountRequest(request, includeEvidence) {
   if (!isObject(request)) throw new Error("provider account request must be an object");
@@ -140,6 +140,7 @@ async function resolveProviderAccountContext(
     runtimeProviderInterfaceId,
     "interface.json",
   ));
+  await hydrateInterfaceDescriptorFromRegistry(descriptor, path.join(octopusHome, "registry"));
   if (
     !isObject(descriptor)
     || descriptor.id !== runtimeProviderInterfaceId
@@ -287,6 +288,7 @@ async function resolveProviderModelCatalogContext(
     runtimeProviderInterfaceId,
     "interface.json",
   ));
+  await hydrateInterfaceDescriptorFromRegistry(descriptor, path.join(octopusHome, "registry"));
   if (
     !isObject(descriptor)
     || descriptor.id !== runtimeProviderInterfaceId

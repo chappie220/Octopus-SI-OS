@@ -445,6 +445,7 @@ async function launchRuntime(environment, options) {
     await recoverStoppedTransactions(environment, host, options.signal);
     assertNotAborted(options.signal);
     await fsp.mkdir(path.dirname(environment.logPath), { recursive: true, mode: 0o700 });
+    await rotateRuntimeLogIfOversized(environment.logPath);
     const log = await fsp.open(environment.logPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600);
     try {
       const stat = await log.stat();
@@ -525,6 +526,31 @@ function projectionStore(environment, { onChange } = {}) {
       return JSON.parse(stdout);
     },
   });
+}
+
+const RUNTIME_LOG_MAX_BYTES = 10 * 1024 * 1024;
+const RUNTIME_LOG_TAIL_BYTES = 1024 * 1024;
+
+async function rotateRuntimeLogIfOversized(logPath) {
+  let stat;
+  try {
+    stat = await fsp.lstat(logPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < RUNTIME_LOG_MAX_BYTES) return;
+  const keepBytes = Math.min(stat.size, RUNTIME_LOG_TAIL_BYTES);
+  const tail = Buffer.alloc(keepBytes);
+  const src = await fsp.open(logPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    await src.read(tail, 0, keepBytes, stat.size - keepBytes);
+  } finally {
+    await src.close();
+  }
+  const rotatedPath = `${logPath}.1`;
+  await fsp.writeFile(rotatedPath, tail, { mode: 0o600 });
+  await fsp.truncate(logPath, 0);
 }
 
 function readEnvironmentFile(file) {

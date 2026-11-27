@@ -34,6 +34,16 @@ pub(crate) fn sibling_descriptor_bytes(
     source_names: Option<&[String]>,
     driver_config: Option<&octopus_interfaces::InterfaceDriverConfig>,
 ) -> Result<String, String> {
+    sibling_descriptor_bytes_against_base(source, source, sibling_id, source_names, driver_config)
+}
+
+pub(crate) fn sibling_descriptor_bytes_against_base(
+    source: &InterfaceDescriptor,
+    disk_base: &InterfaceDescriptor,
+    sibling_id: &str,
+    source_names: Option<&[String]>,
+    driver_config: Option<&octopus_interfaces::InterfaceDriverConfig>,
+) -> Result<String, String> {
     let mut sibling = source.clone();
     copy_interface_descriptor(&mut sibling, sibling_id);
     if let Some(source_names) = source_names {
@@ -41,6 +51,9 @@ pub(crate) fn sibling_descriptor_bytes(
     }
     if let Some(config) = driver_config {
         sibling.interface_driver_config = Some(config.clone());
+    }
+    if sibling.copy_of.as_ref() == Some(&disk_base.id) {
+        sibling.strip_inherited_driver_config(disk_base);
     }
     let content = pretty_json(
         &serde_json::to_value(sibling)

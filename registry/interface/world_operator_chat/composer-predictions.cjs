@@ -19,6 +19,7 @@ async function requestComposerPrediction(options, input) {
     const registry = path.join(home, "registry");
     const provider = segment(chat.provider_bound_interface_id);
     const descriptor = await json(path.join(registry, "interface", provider, "interface.json"));
+    await require("./client/values.cjs").hydrateInterfaceDescriptorFromRegistry(descriptor, registry);
     if (descriptor.id !== provider || descriptor.interface_driver_ref !== config.provider_driver
       || descriptor.interface_driver_config?.private_config?.opencodex) return null;
     const identity = { ...predictionIdentity(config, runId, provider), ee: `ee_client_maintenance_${segment(chat.os_root_ee_id)}` };

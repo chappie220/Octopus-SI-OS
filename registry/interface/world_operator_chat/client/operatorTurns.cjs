@@ -13,7 +13,7 @@ const { readConfig, resolveEeInstancesRoot, resolveInstallationRoot, resolvePack
 const { planOperatorChatSurface } = require("./surfacePlanning.cjs");
 const { validatePlannedHostBindings } = require("./hostBindings.cjs");
 const { assertPublicationExpansion, canonicalJson, interfaceEndpoint, interfaceSocketIdentity, operatorContextArtifactBindings, operatorDoorHostSlots, operatorPayloadArtifactBindings, operatorSelectedWorkerEnvironmentKinds, operatorSurfaceRole, planOperatorChatTopology, plannedAdditionalRunWrites, plannedClientWrite, safeContractToken, validatePlannedRunRecord } = require("./topologyPlan.cjs");
-const { absolutePath, arrayValue, assertAdmitted, nonNegativeInteger, numberValue, optionalServiceTier, randomToken, readJsonDocumentIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, requiredTrimmedString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
+const { absolutePath, arrayValue, assertAdmitted, hydrateInterfaceDescriptorFromRegistry, nonNegativeInteger, numberValue, optionalServiceTier, randomToken, readJsonDocumentIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, requiredTrimmedString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
 
 async function submitOperatorTurn(options, request) {
   const config = await readConfig();
@@ -535,6 +535,7 @@ async function planExistingProviderSelection(options, input) {
   if (!providerDescriptor) {
     throw new Error(`operator chat provider '${providerInterfaceId}' has no exact descriptor`);
   }
+  await hydrateInterfaceDescriptorFromRegistry(providerDescriptor.value, registryRoot);
   const privateConfig = requiredObject(
     requiredObject(
       providerDescriptor.value.interface_driver_config,
@@ -891,10 +892,11 @@ function selectedProviderDescriptorContent(
     plannedProviderDescriptor.interface_driver_config,
     "planned provider interface_driver_config",
   );
-  selectedProviderDriverConfig.supported_reasoning_efforts = requiredArray(
-    plannedProviderDriverConfig.supported_reasoning_efforts,
-    "planned provider supported_reasoning_efforts",
-  );
+  if (Array.isArray(plannedProviderDriverConfig.supported_reasoning_efforts)) {
+    selectedProviderDriverConfig.supported_reasoning_efforts = plannedProviderDriverConfig.supported_reasoning_efforts;
+  } else {
+    delete selectedProviderDriverConfig.supported_reasoning_efforts;
+  }
   const selectedProviderPrivateConfig = requiredObject(
     selectedProviderDriverConfig.private_config,
     "selected provider private_config",
@@ -903,10 +905,11 @@ function selectedProviderDescriptorContent(
     plannedProviderDriverConfig.private_config,
     "planned provider private_config",
   );
-  selectedProviderPrivateConfig.model_catalog = requiredArray(
-    plannedProviderPrivateConfig.model_catalog,
-    "planned provider model_catalog",
-  );
+  if (Array.isArray(plannedProviderPrivateConfig.model_catalog)) {
+    selectedProviderPrivateConfig.model_catalog = plannedProviderPrivateConfig.model_catalog;
+  } else {
+    delete selectedProviderPrivateConfig.model_catalog;
+  }
   selectedProviderPrivateConfig.model = requiredString(model, "planned provider model");
   const resolvedServiceTier = optionalServiceTier(serviceTier);
   if (resolvedServiceTier) selectedProviderPrivateConfig.service_tier = resolvedServiceTier;
@@ -917,5 +920,5 @@ function selectedProviderDescriptorContent(
   } else {
     delete selectedProviderPrivateConfig.reasoning_effort;
   }
-  return `${JSON.stringify(selectedProviderDescriptor, null, 2)}\n`;
+  return `${JSON.stringify(selectedProviderDescriptor)}\n`;
 }
