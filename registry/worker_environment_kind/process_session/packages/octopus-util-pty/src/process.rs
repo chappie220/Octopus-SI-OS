@@ -393,7 +393,7 @@ fn resize_raw_pty(raw_fd: RawFd, size: TerminalSize) -> anyhow::Result<()> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let result = unsafe { libc::ioctl(raw_fd, libc::TIOCSWINSZ, &mut winsize) };
+    let result = unsafe { libc::ioctl(raw_fd, libc::TIOCSWINSZ as _, &mut winsize) };
     if result == -1 {
         return Err(std::io::Error::last_os_error().into());
     }

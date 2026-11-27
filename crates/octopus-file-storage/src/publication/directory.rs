@@ -574,7 +574,16 @@ fn rename_no_replace(movement: &DirectoryMove, parents: &BTreeMap<PathBuf, FileI
         #[cfg(target_vendor = "apple")]
         let result = unsafe { libc::renameatx_np(source_parent.as_raw_fd(), source_name.as_ptr(), destination_parent.as_raw_fd(), destination_name.as_ptr(), libc::RENAME_EXCL) };
         #[cfg(target_os = "linux")]
-        let result = unsafe { libc::renameat2(source_parent.as_raw_fd(), source_name.as_ptr(), destination_parent.as_raw_fd(), destination_name.as_ptr(), libc::RENAME_NOREPLACE) };
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                source_parent.as_raw_fd(),
+                source_name.as_ptr(),
+                destination_parent.as_raw_fd(),
+                destination_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
         #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
         return Err(io::Error::new(io::ErrorKind::Unsupported, "atomic no-replace directory publication is unavailable"));
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
