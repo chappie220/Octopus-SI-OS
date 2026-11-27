@@ -1,8 +1,85 @@
 use super::*;
+use std::collections::HashMap;
 use std::path::Component;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_MOVES: usize = 128;
 const MAX_ENTRIES: usize = 16384;
+const SETTLED_DIGEST_CACHE_MAX: usize = 8192;
+const SETTLED_DIGEST_MIN_AGE: Duration = Duration::from_secs(2);
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SettledDigestKey {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    mode: u32,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    algorithm: u8,
+}
+
+fn settled_digest_cache() -> &'static Mutex<HashMap<SettledDigestKey, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<SettledDigestKey, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn settled_digest_key(metadata: &Metadata, algorithm: DigestAlgorithm) -> Option<SettledDigestKey> {
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    if age < SETTLED_DIGEST_MIN_AGE {
+        return None;
+    }
+    let mtime = modified.duration_since(UNIX_EPOCH).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(SettledDigestKey {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            bytes: metadata.len(),
+            mode: mode(metadata),
+            mtime_secs: mtime.as_secs(),
+            mtime_nanos: mtime.subsec_nanos(),
+            algorithm: match algorithm {
+                DigestAlgorithm::Sha256 => 1,
+                DigestAlgorithm::Blake3 => 2,
+            },
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (mtime, algorithm);
+        None
+    }
+}
+
+fn digest_file_cached(file: &File, metadata: &Metadata, algorithm: DigestAlgorithm) -> io::Result<String> {
+    let key = settled_digest_key(metadata, algorithm);
+    if let Some(key) = &key {
+        if let Ok(cache) = settled_digest_cache().lock() {
+            if let Some(hit) = cache.get(key) {
+                return Ok(hit.clone());
+            }
+        }
+    }
+    let digest = digest_file(file, algorithm)?;
+    if let Some(key) = key {
+        if let Ok(after) = file.metadata() {
+            if settled_digest_key(&after, algorithm).as_ref() == Some(&key) {
+                if let Ok(mut cache) = settled_digest_cache().lock() {
+                    if cache.len() >= SETTLED_DIGEST_CACHE_MAX {
+                        cache.clear();
+                    }
+                    cache.insert(key, digest.clone());
+                }
+            }
+        }
+    }
+    Ok(digest)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,8 +328,9 @@ fn capture_entry_at(parent: &File, name: &std::ffi::OsStr, relative_path: PathBu
         DirectoryEntryKind::Directory => (0, None),
         DirectoryEntryKind::File => {
             let file = native::child(parent, name, false)?;
-            if FileIdentity::of(&file.metadata()?)? != before.identity { return Err(invalid("manifest file changed identity")); }
-            (before.bytes, Some(digest_file(&file, algorithm)?))
+            let metadata = file.metadata()?;
+            if FileIdentity::of(&metadata)? != before.identity { return Err(invalid("manifest file changed identity")); }
+            (before.bytes, Some(digest_file_cached(&file, &metadata, algorithm)?))
         },
         DirectoryEntryKind::Symlink => {
             let bytes = native::link_target(parent, name)?;

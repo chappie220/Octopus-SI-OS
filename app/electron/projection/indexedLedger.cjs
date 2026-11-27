@@ -15,9 +15,14 @@ const INDEXED_MOVEMENT_COLUMNS = `
 
 const DEFAULT_INDEXED_ENVELOPES_LIMIT = 5_000;
 const RECENT_MOVEMENTS_WINDOW = 1_000;
-const SEQ_TIMESTAMP_CACHE_MAX = 4_096;
-const RUN_CHECKPOINTS_CACHE_MAX = 512;
-const RUN_ENVELOPES_CACHE_MAX = 256;
+const SEQ_TIMESTAMP_CACHE_MAX = 2_048;
+const RUN_CHECKPOINTS_CACHE_MAX = 256;
+const RUN_ENVELOPES_CACHE_MAX = 128;
+const LEDGER_ARTIFACTS_CACHE_MAX = 4_096;
+const LEDGER_ARTIFACTS_INITIAL_SCAN_LIMIT = 8_192;
+const MARKS_CACHE_MAX = 4_096;
+const PENDING_ARTIFACTS_CACHE_MAX = 1_024;
+const UNINDEXED_STREAM_FALLBACK_MAX_BYTES = 32 * 1024 * 1024;
 
 function indexedLedgerProjection(store) {
   let persistentLedgerState = null;
@@ -173,7 +178,13 @@ function indexedLedgerProjection(store) {
       || previewRank > current.previewRank
       || (previewRank === current.previewRank && compareArtifactMovementNewest(row, current.row) < 0)
     ) {
+      if (current) ledgerArtifacts.delete(artifactId);
       ledgerArtifacts.set(artifactId, { coordinates, previewRank, row });
+      while (ledgerArtifacts.size > LEDGER_ARTIFACTS_CACHE_MAX) {
+        const oldest = ledgerArtifacts.keys().next().value;
+        if (oldest === undefined || oldest === artifactId) break;
+        ledgerArtifacts.delete(oldest);
+      }
       return true;
     }
     return false;
@@ -259,6 +270,9 @@ function indexedLedgerProjection(store) {
     const baseKind = movementBaseKind(movement);
     if (baseKind === "MarkOutcomeAdmitted") {
       state.marks.push(movement);
+      if (state.marks.length > MARKS_CACHE_MAX * 2) {
+        state.marks.splice(0, state.marks.length - MARKS_CACHE_MAX);
+      }
     }
     if (accumulateArtifactRow(state.ledgerArtifacts, movement)) {
       state.finalizedArtifacts = null;
@@ -319,6 +333,9 @@ function indexedLedgerProjection(store) {
         created_at: timestampOf(movement),
         raw: movement,
       });
+      if (state.pendingArtifacts.length > PENDING_ARTIFACTS_CACHE_MAX * 2) {
+        state.pendingArtifacts.splice(0, state.pendingArtifacts.length - PENDING_ARTIFACTS_CACHE_MAX);
+      }
     }
 
     if (state.seqTimestamps.has(seq) || state.seqTimestamps.size < SEQ_TIMESTAMP_CACHE_MAX) {
@@ -419,9 +436,11 @@ function indexedLedgerProjection(store) {
           `SELECT ${INDEXED_MOVEMENT_COLUMNS}
            FROM movements
            WHERE kind = 'MarkOutcomeAdmitted' AND seq < ?
-           ORDER BY seq ASC`,
-        ).all(index.watermark);
-        for (const row of markRowsSql) {
+           ORDER BY seq DESC
+           LIMIT ?`,
+        ).all(index.watermark, MARKS_CACHE_MAX);
+        for (let i = markRowsSql.length - 1; i >= 0; i--) {
+          const row = markRowsSql[i];
           const normalized = normalizeIndexedProjectionMovement(row, index.ledgerPath);
           state.marks.push(normalized);
           const runId = stringValue(row.runtime_run);
@@ -429,31 +448,34 @@ function indexedLedgerProjection(store) {
           if (runId && markId) state.outcomes.set(`${runId}\u0000${markId}`, "closed");
         }
 
-        const kinds = looseDistinctColumnValues(index.database, "kind", index.watermark)
-          .filter((kind) => kind !== "DeliveryRefused");
-        if (kinds.length > 0) {
-          const placeholders = kinds.map(() => "?").join(", ");
-          const artifactRowsSql = index.database.prepare(
-            `SELECT ${INDEXED_MOVEMENT_COLUMNS}
-             FROM movements
-             WHERE kind IN (${placeholders}) AND seq < ? AND artifact_id IS NOT NULL`,
-          ).all(...kinds, index.watermark);
-          for (const row of artifactRowsSql) {
-            accumulateArtifactRow(state.ledgerArtifacts, normalizeIndexedProjectionMovement(row, index.ledgerPath));
-          }
-        }
-        const distinctArtifactIds = looseDistinctColumnValues(index.database, "artifact_id", index.watermark);
-        const latestByArtifactStmt = index.database.prepare(
+        const artifactRowsSql = index.database.prepare(
           `SELECT ${INDEXED_MOVEMENT_COLUMNS}
            FROM movements
-           WHERE artifact_id = ? AND seq < ?
+           WHERE kind != 'DeliveryRefused' AND seq < ? AND artifact_id IS NOT NULL
            ORDER BY seq DESC
-           LIMIT 1`,
-        );
-        for (const artifactId of distinctArtifactIds) {
-          if (state.ledgerArtifacts.has(artifactId)) continue;
-          const row = latestByArtifactStmt.get(artifactId, index.watermark);
-          if (row) accumulateArtifactRow(state.ledgerArtifacts, normalizeIndexedProjectionMovement(row, index.ledgerPath));
+           LIMIT ?`,
+        ).all(index.watermark, LEDGER_ARTIFACTS_INITIAL_SCAN_LIMIT);
+        for (let i = artifactRowsSql.length - 1; i >= 0; i--) {
+          accumulateArtifactRow(
+            state.ledgerArtifacts,
+            normalizeIndexedProjectionMovement(artifactRowsSql[i], index.ledgerPath),
+          );
+        }
+        const refusedArtifactRows = index.database.prepare(
+          `SELECT ${INDEXED_MOVEMENT_COLUMNS}
+           FROM movements
+           WHERE kind = 'DeliveryRefused' AND seq < ? AND artifact_id IS NOT NULL
+           ORDER BY seq DESC
+           LIMIT 512`,
+        ).all(index.watermark);
+        for (let i = refusedArtifactRows.length - 1; i >= 0; i--) {
+          const row = refusedArtifactRows[i];
+          const artifactId = stringValue(row.artifact_id);
+          if (!artifactId || state.ledgerArtifacts.has(artifactId)) continue;
+          accumulateArtifactRow(
+            state.ledgerArtifacts,
+            normalizeIndexedProjectionMovement(row, index.ledgerPath),
+          );
         }
 
         for (const label of looseDistinctColumnValues(index.database, "artifact_label", index.watermark)) {
@@ -461,8 +483,8 @@ function indexedLedgerProjection(store) {
         }
 
         const failedOffsets = index.database.prepare(
-          "SELECT start_offset, end_offset FROM movements WHERE kind = 'VerificationFailed' AND seq < ?",
-        ).all(index.watermark);
+          "SELECT start_offset, end_offset FROM movements WHERE kind = 'VerificationFailed' AND seq < ? ORDER BY seq DESC LIMIT 2048",
+        ).all(index.watermark).reverse();
         if (failedOffsets.length > 0) {
           const failedMovements = await readIndexedRawMovementsByOffsets(index.ledgerPath, failedOffsets);
           for (const row of failedMovements) {
@@ -474,7 +496,7 @@ function indexedLedgerProjection(store) {
           }
         }
 
-        const distinctRuns = looseDistinctColumnValues(index.database, "runtime_run", index.watermark);
+        const distinctRuns = looseDistinctColumnValues(index.database, "runtime_run", index.watermark).slice(0, 1024);
         if (distinctRuns.length > 0) {
           const firstRowStmt = index.database.prepare(
             "SELECT start_offset, end_offset FROM movements WHERE runtime_run = ? AND seq < ? ORDER BY seq DESC LIMIT 1",
@@ -550,7 +572,16 @@ function indexedLedgerProjection(store) {
 
     if (requireIndex) return null;
 
-    // Bounded streaming fallback: single pass builds all summary structures without retaining unrelated rows.
+    if (stat && stat.size > UNINDEXED_STREAM_FALLBACK_MAX_BYTES) {
+      if (persistentLedgerState && persistentLedgerState.durableRoot === durableRoot) {
+        return persistentLedgerState;
+      }
+      throw new Error(
+        `Refusing full unindexed scan of ${Math.round(stat.size / (1024 * 1024))} MiB ledger while ledger-index.sqlite is unavailable`,
+      );
+    }
+
+    // Bounded streaming fallback for small ledgers without an index yet.
     const state = createEmptyLedgerState(durableRoot, ledgerPath, stat, false);
     const tail = await streamLedgerTail(
       ledgerPath,

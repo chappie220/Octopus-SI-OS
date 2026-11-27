@@ -10,6 +10,8 @@ const { ARTIFACT_PAYLOAD_READ_CONCURRENCY, ProjectionEvidenceError, RESOLVED_ART
 const { loadLedgerArtifactPayload, movementKindText, movementRunId, validateCanonicalMovement } = require("./movementRows.cjs");
 const { contentHashHex, ledgerArtifactId, ledgerArtifactLabel, stringValue } = require("./values.cjs");
 
+const UNINDEXED_FULL_LEDGER_READ_MAX_BYTES = 64 * 1024 * 1024;
+
 function ledgerProjection(store) {
   function resolveDurableRoot() {
     return path.join(store.octopusHome(), "ledger");
@@ -93,6 +95,11 @@ function ledgerProjection(store) {
     if (stat.size === cursor.offset) {
       ledgerCursors.set(file, cursor);
       return cursor;
+    }
+    if (cursor.offset === 0 && stat.size > UNINDEXED_FULL_LEDGER_READ_MAX_BYTES) {
+      throw new Error(
+        `Refusing unindexed full in-memory load of ${Math.round(stat.size / (1024 * 1024))} MiB ledger (${file}); ledger-index.sqlite is required`,
+      );
     }
     let pending = [];
     let pendingLength = 0;
@@ -212,9 +219,9 @@ function ledgerProjection(store) {
         if (actual !== content) throw new Error(`content integrity mismatch: expected ${content}, got ${actual}`);
         if (fingerprint() !== before) throw new Error("metadata content changed while being read");
         value = JSON.parse(bytes.toString("utf8"));
-        const maxBytes = 8 * 1024 * 1024;
+        const maxBytes = 2 * 1024 * 1024;
         if (bytes.length <= maxBytes) {
-          while (resolvedMovementMetadata.size >= 64 || resolvedMovementMetadataBytes + bytes.length > maxBytes) {
+          while (resolvedMovementMetadata.size >= 32 || resolvedMovementMetadataBytes + bytes.length > maxBytes) {
             const oldest = resolvedMovementMetadata.keys().next().value;
             resolvedMovementMetadataBytes -= resolvedMovementMetadata.get(oldest).byteLength;
             resolvedMovementMetadata.delete(oldest);

@@ -102,8 +102,10 @@ pub struct LedgerSqliteReader {
 impl LedgerSqliteIndex {
     pub fn open(path: &Path) -> Result<Self, SqliteIndexError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "cache_size", -4096)?;
         let mut index = Self { conn };
         index.ensure_schema()?;
         Ok(index)
@@ -780,7 +782,9 @@ impl LedgerSqliteReader {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         conn.pragma_update(None, "query_only", "ON")?;
+        conn.pragma_update(None, "cache_size", -4096)?;
         let schema_version = required_meta_u64(&conn, "schema_version")?;
         if schema_version != SCHEMA_VERSION as u64 {
             return Err(SqliteIndexError::SchemaGeneration {
@@ -789,6 +793,27 @@ impl LedgerSqliteReader {
             });
         }
         Ok(Self { conn })
+    }
+
+    pub fn movement_start_offset(&self, seq: u64) -> Result<Option<u64>, SqliteIndexError> {
+        let offset: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT start_offset FROM movements WHERE seq = ?1",
+                params![seq as i64],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        match offset {
+            Some(value) if value >= 0 => Ok(Some(value as u64)),
+            Some(value) => Err(SqliteIndexError::InvalidRowRange {
+                seq,
+                start_offset: value,
+                end_offset: value,
+            }),
+            None => Ok(None),
+        }
     }
 
     pub fn progress(&self) -> Result<LedgerIndexProgress, SqliteIndexError> {

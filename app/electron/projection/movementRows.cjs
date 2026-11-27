@@ -153,39 +153,47 @@ async function openValidatedLedgerIndex(projection) {
   }
   const ledgerPath = path.join(projection.durableRoot, "movements.jsonl");
   const indexPath = path.join(projection.durableRoot, "ledger-index.sqlite");
-  let database;
-  try {
-    database = new DatabaseSync(indexPath, { readOnly: true });
-    database.exec("PRAGMA query_only = ON; BEGIN");
-    const meta = database.prepare(
-      "SELECT key, value FROM index_meta WHERE key IN ('schema_version', 'watermark', 'durable_end_offset')",
-    ).all();
-    const values = new Map(meta.map((row) => [String(row.key), String(row.value)]));
-    if (values.get("schema_version") !== "4") {
-      database.close();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let database;
+    try {
+      database = new DatabaseSync(indexPath, { readOnly: true, timeout: 5_000 });
+      database.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -4096; BEGIN");
+      const meta = database.prepare(
+        "SELECT key, value FROM index_meta WHERE key IN ('schema_version', 'watermark', 'durable_end_offset')",
+      ).all();
+      const values = new Map(meta.map((row) => [String(row.key), String(row.value)]));
+      if (values.get("schema_version") !== "4") {
+        database.close();
+        return null;
+      }
+      const watermark = indexedUnsignedInteger(values.get("watermark"));
+      const durableEndOffset = indexedUnsignedInteger(values.get("durable_end_offset"));
+      const ledgerStat = await fs.stat(ledgerPath);
+      if (watermark === null || durableEndOffset === null || durableEndOffset > ledgerStat.size) {
+        database.close();
+        return null;
+      }
+      const last = database.prepare("SELECT seq FROM movements ORDER BY seq DESC LIMIT 1").get();
+      if (
+        watermark === 0
+          ? last !== undefined
+          : indexedUnsignedInteger(last?.seq) !== watermark - 1
+      ) {
+        database.close();
+        return null;
+      }
+      return { database, durableEndOffset, ledgerPath, ledgerSize: ledgerStat.size, watermark };
+    } catch (error) {
+      database?.close();
+      const msg = String(error?.message ?? error);
+      if (attempt < 2 && /SQLITE_BUSY|SQLITE_LOCKED|database is locked/i.test(msg)) {
+        await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+        continue;
+      }
       return null;
     }
-    const watermark = indexedUnsignedInteger(values.get("watermark"));
-    const durableEndOffset = indexedUnsignedInteger(values.get("durable_end_offset"));
-    const ledgerStat = await fs.stat(ledgerPath);
-    if (watermark === null || durableEndOffset === null || durableEndOffset > ledgerStat.size) {
-      database.close();
-      return null;
-    }
-    const last = database.prepare("SELECT seq FROM movements ORDER BY seq DESC LIMIT 1").get();
-    if (
-      watermark === 0
-        ? last !== undefined
-        : indexedUnsignedInteger(last?.seq) !== watermark - 1
-    ) {
-      database.close();
-      return null;
-    }
-    return { database, durableEndOffset, ledgerPath, ledgerSize: ledgerStat.size, watermark };
-  } catch {
-    database?.close();
-    return null;
   }
+  return null;
 }
 
 async function projectionLedgerSourceCursor(projection, primarySeq) {
@@ -564,6 +572,10 @@ function normalizeIndexedProjectionMovement(row, ledgerPath) {
   if (seq === null || lamport === null || recordedAt === null) {
     throw new Error("ledger index contains a non-integer movement coordinate");
   }
+  const trace = stringValue(row.trace);
+  if (!trace) {
+    throw new ProjectionEvidenceError(`ledger movement trace is empty: ${ledgerPath}:${seq + 1}`);
+  }
   const artifactId = stringValue(row.artifact_id);
   const content = contentHashHex(row.artifact_content);
   if (Boolean(artifactId) !== Boolean(content)) {
@@ -575,24 +587,18 @@ function normalizeIndexedProjectionMovement(row, ledgerPath) {
     interface: stringValue(row.runtime_interface),
   };
   const mark = stringValue(row.mark);
+  const baseKind = stringValue(row.kind);
+  if (!mark && !baseKind) {
+    throw new ProjectionEvidenceError(`ledger index movement ${seq} has an empty kind`);
+  }
   const from = indexedEndpoint(row.from_kind, row.from_id);
   const to = indexedEndpoint(row.to_kind, row.to_id);
-  const canonical = validateCanonicalMovement({
-    seq,
-    lamport,
-    recorded_at_unix_ms: recordedAt,
-    trace: stringValue(row.trace),
-    kind: mark ? { MarkOutcomeAdmitted: mark } : stringValue(row.kind),
-    from,
-    to,
-    ...(artifactId ? { artifact: { id: artifactId, content: [...Buffer.from(content, "hex")] } } : {}),
-  }, ledgerPath, seq + 1);
   return {
     seq,
     lamport,
     recorded_at_unix_ms: recordedAt,
-    trace: canonical.trace,
-    kind: movementKindText(canonical.kind),
+    trace,
+    kind: mark ? `MarkOutcomeAdmitted(${mark})` : baseKind,
     from,
     to,
     ...(artifactId ? { artifact: { id: artifactId, content } } : {}),

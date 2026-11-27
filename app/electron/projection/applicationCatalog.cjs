@@ -205,9 +205,8 @@ async function snapshotApplicationPackageDirectory(interfaceRoot, interfaceId, s
     };
   }
   const observedAtMs = Date.now();
-  const allowSettledFileCache = !options.fresh;
   for (const { relative_path: relativePath, path: entryPath, stat: before } of inventory) {
-    let content = allowSettledFileCache ? getSettledFileSha256(entryPath, before, observedAtMs) : null;
+    let content = getSettledFileSha256(entryPath, before, observedAtMs);
     if (!content) {
       content = await hashApplicationFile(entryPath);
       const after = await fs.lstat(entryPath);
@@ -224,7 +223,7 @@ async function snapshotApplicationPackageDirectory(interfaceRoot, interfaceId, s
       ) {
         throw new Error(`${sourceKind} application package changed while it was inspected: ${entryPath}`);
       }
-      if (allowSettledFileCache) setSettledFileSha256(entryPath, after, content, observedAtMs);
+      setSettledFileSha256(entryPath, after, content, observedAtMs);
     }
     files.push({
       relative_path: relativePath,

@@ -1831,9 +1831,8 @@ async function snapshotDirectory(rootValue, options = {}) {
     return cached.snapshot;
   }
   const observedAtMs = Date.now();
-  const allowSettledFileCache = Boolean(options.cacheKey);
   for (const { path: absolute, relative_path: relative, stat } of inventory) {
-    let content = allowSettledFileCache ? getSettledFileSha256(absolute, stat, observedAtMs) : null;
+    let content = getSettledFileSha256(absolute, stat, observedAtMs);
     if (!content) {
       const handle = await fs.open(absolute, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
       try { content = await hashFileHandle(handle); }
@@ -1843,7 +1842,7 @@ async function snapshotDirectory(rootValue, options = {}) {
         || current.ctimeMs !== stat.ctimeMs || current.mode !== stat.mode || current.ino !== stat.ino || !current.isFile()) {
         throw new Error(`local package file changed while reading: ${absolute}`);
       }
-      if (allowSettledFileCache) setSettledFileSha256(absolute, current, content, observedAtMs);
+      setSettledFileSha256(absolute, current, content, observedAtMs);
     }
     files.push({ path: absolute, relative_path: relative, size: stat.size, mode: stat.mode & 0o777, sha256: content.sha256 });
   }
@@ -2992,7 +2991,12 @@ async function copySnapshotFile(file, targetRoot) {
   try {
     const before = await source.stat();
     if (!before.isFile()) throw new Error(`local package source is not a regular file: ${file.path}`);
-    const content = await hashFileHandle(source);
+    const observedAtMs = Date.now();
+    let content = getSettledFileSha256(file.path, before, observedAtMs);
+    if (!content) {
+      content = await hashFileHandle(source);
+      setSettledFileSha256(file.path, before, content, observedAtMs);
+    }
     const stat = await source.stat();
     if (!stat.isFile() || stat.size !== (file.input_size ?? file.size) || content.size !== stat.size
       || (stat.mode & 0o777) !== (file.input_mode ?? file.mode) || content.sha256 !== (file.input_sha256 ?? file.sha256)
@@ -3006,33 +3010,50 @@ async function copySnapshotFile(file, targetRoot) {
         || sha256Bytes(await fs.readFile(input.path)) !== input.sha256) throw new Error(`package configuration changed while copying '${input.path}'`);
     }
     const target = path.join(targetRoot, file.relative_path);
-    const clone = file.body === undefined && process.platform !== "linux";
+    const linkImmutable = file.body === undefined
+      && !file.configuration_input
+      && process.platform === "linux"
+      && !file.relative_path.endsWith(".json");
+    let hardlinked = false;
+    if (linkImmutable) {
+      try {
+        await fs.link(file.path, target);
+        hardlinked = true;
+      } catch (error) {
+        if (error?.code !== "EXDEV" && error?.code !== "EPERM" && error?.code !== "EMLINK") throw error;
+      }
+    }
+    const clone = !hardlinked && file.body === undefined && process.platform !== "linux";
     if (clone) {
       const parent = await fs.open(path.dirname(target), fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW);
       try { require("./nativeFiles.cjs").cloneFile(source.fd, parent.fd, path.basename(target)); }
       finally { await parent.close(); }
     }
-    const handle = await fs.open(target, clone ? fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW : "wx", file.mode);
+    if (!hardlinked && !clone && file.body === undefined) {
+      await fs.copyFile(file.path, target, fsSync.constants.COPYFILE_EXCL | fsSync.constants.COPYFILE_FICLONE);
+    }
+    const openFlags = (hardlinked || clone || file.body === undefined)
+      ? fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW
+      : "wx";
+    const handle = await fs.open(target, openFlags, file.mode);
     try {
       if (file.body !== undefined) await handle.writeFile(file.body);
-      else if (!clone) {
-        const buffer = Buffer.allocUnsafe(64 * 1024);
-        for (let offset = 0; offset < stat.size;) {
-          const { bytesRead } = await source.read(buffer, 0, Math.min(buffer.length, stat.size - offset), offset);
-          if (!bytesRead) throw new Error(`local package source was truncated while copying '${file.path}'`);
-          await handle.writeFile(buffer.subarray(0, bytesRead));
-          offset += bytesRead;
-        }
-      }
       const installed = await handle.stat();
-      if (!installed.isFile() || installed.nlink !== 1 || installed.dev === stat.dev && installed.ino === stat.ino) {
+      if (!installed.isFile() || (!hardlinked && (installed.nlink !== 1 || (installed.dev === stat.dev && installed.ino === stat.ino)))) {
         throw new Error(`local package copy is not isolated: ${target}`);
       }
-      await handle.chmod(file.mode);
-      await handle.sync();
+      if (!hardlinked) {
+        await handle.chmod(file.mode);
+        await handle.sync();
+      }
     } finally { await handle.close(); }
     const after = await source.stat();
-    if (after.size !== stat.size || after.mode !== stat.mode || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
+    if (
+      after.size !== stat.size
+      || after.mode !== stat.mode
+      || after.mtimeMs !== stat.mtimeMs
+      || (!hardlinked && after.ctimeMs !== stat.ctimeMs)
+    ) {
       throw new Error(`local package source changed while copying '${file.path}'`);
     }
   } finally { await source.close(); }

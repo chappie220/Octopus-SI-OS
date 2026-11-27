@@ -8,7 +8,7 @@ const { appendOperatorChatAssistantMessage, nativeTurnRecordedInputs, operatorCh
 const { baseInterfaceRows } = require("./registryRows.cjs");
 const { arrayValue, contentHashHex, ledgerArtifactId, ledgerArtifactLabel, numberValue, objectOrEmpty, rowTimeMs, stringValue } = require("./values.cjs");
 
-const OPERATOR_CHAT_MESSAGES_CACHE_MAX_ENTRIES = 32;
+const OPERATOR_CHAT_MESSAGES_CACHE_MAX_ENTRIES = 8;
 
 function operatorChatMessagesProjection(store) {
   async function operatorChatMessages(projection, runId) {

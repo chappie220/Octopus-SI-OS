@@ -152,18 +152,34 @@ impl EvidenceTail {
         writer_door: &octopus_descriptors::InterfaceId,
     ) -> Result<(), String> {
         let maximum = ctx.required_host_io_limits()?.max_control_frame_bytes;
-        if self
+        let file_len = self
             .reader
             .get_ref()
             .metadata()
             .map_err(|e| e.to_string())?
-            .len()
-            < self.reader.stream_position().map_err(|e| e.to_string())?
-        {
+            .len();
+        if file_len < self.reader.stream_position().map_err(|e| e.to_string())? {
             return Err("intake ledger was truncated".into());
         }
         self.rows
             .retain(|row| completed.is_none_or(|seq| row.seq.0 > seq));
+        if self.next_seq < pending_seq {
+            let index_path = ctx.movements_path.with_file_name("ledger-index.sqlite");
+            if let Ok(index) = octopus_ledger_index::LedgerSqliteReader::open(&index_path) {
+                if let Ok(progress) = index.progress() {
+                    if progress.watermark > pending_seq {
+                        if let Ok(Some(offset)) = index.movement_start_offset(pending_seq) {
+                            if offset <= file_len {
+                                self.reader
+                                    .seek(std::io::SeekFrom::Start(offset))
+                                    .map_err(|e| e.to_string())?;
+                                self.next_seq = pending_seq;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         while self.next_seq < pending_seq {
             let start = self.reader.stream_position().map_err(|e| e.to_string())?;
             let mut bytes = Vec::new();

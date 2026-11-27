@@ -15,6 +15,8 @@ const { inspectLocalPackageInstallation, recoverLocalPackageTransactions, regist
 const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
+const { openSqliteLogStore } = require("../electron/sqliteLogStore.cjs");
+const { setSettledHashStoreHome } = require("../electron/settledFileHashCache.cjs");
 
 const privateEnvironments = new WeakMap();
 const starts = new Map();
@@ -102,6 +104,7 @@ function resolveEnvironment(options = {}) {
 
 function createEnvironment(options = {}) {
   const resolved = resolveEnvironment(options);
+  setSettledHashStoreHome(resolved.home);
   let account = null;
   let statusProjection = null;
   let signInHandler = options.openExternal ?? options.ui?.openExternal;
@@ -445,7 +448,8 @@ async function launchRuntime(environment, options) {
     await recoverStoppedTransactions(environment, host, options.signal);
     assertNotAborted(options.signal);
     await fsp.mkdir(path.dirname(environment.logPath), { recursive: true, mode: 0o700 });
-    await rotateRuntimeLogIfOversized(environment.logPath);
+    await rotateRuntimeLogIfOversized(environment.logPath, environment.home);
+    try { openSqliteLogStore(environment.home).append("runtime", "info", `Starting ${environment.runtimeBinary} up`); } catch {}
     const log = await fsp.open(environment.logPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600);
     try {
       const stat = await log.stat();
@@ -528,10 +532,45 @@ function projectionStore(environment, { onChange } = {}) {
   });
 }
 
-const RUNTIME_LOG_MAX_BYTES = 10 * 1024 * 1024;
-const RUNTIME_LOG_TAIL_BYTES = 1024 * 1024;
+const RUNTIME_LOG_MAX_BYTES = 4 * 1024 * 1024;
+const RUNTIME_LOG_TAIL_BYTES = 256 * 1024;
 
-async function rotateRuntimeLogIfOversized(logPath) {
+async function ingestRuntimeLogIntoSqlite(home, logPath) {
+  let stat;
+  try {
+    stat = await fsp.lstat(logPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) return;
+  const maxRead = Math.min(stat.size, RUNTIME_LOG_MAX_BYTES);
+  const start = Math.max(0, stat.size - maxRead);
+  const buf = Buffer.alloc(maxRead);
+  const src = await fsp.open(logPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let bytesRead = 0;
+  try {
+    ({ bytesRead } = await src.read(buf, 0, maxRead, start));
+  } finally {
+    await src.close();
+  }
+  if (bytesRead > 0) {
+    try {
+      const logStore = openSqliteLogStore(home);
+      logStore.appendLines("runtime", "info", buf.subarray(0, bytesRead).toString("utf8"));
+    } catch {}
+  }
+  if (stat.size >= RUNTIME_LOG_MAX_BYTES) {
+    const keepBytes = Math.min(bytesRead, RUNTIME_LOG_TAIL_BYTES);
+    await fsp.writeFile(logPath, buf.subarray(bytesRead - keepBytes, bytesRead), { mode: 0o600 });
+  }
+}
+
+async function rotateRuntimeLogIfOversized(logPath, home = null) {
+  if (home) {
+    await ingestRuntimeLogIntoSqlite(home, logPath);
+    return;
+  }
   let stat;
   try {
     stat = await fsp.lstat(logPath);
@@ -548,9 +587,7 @@ async function rotateRuntimeLogIfOversized(logPath) {
   } finally {
     await src.close();
   }
-  const rotatedPath = `${logPath}.1`;
-  await fsp.writeFile(rotatedPath, tail, { mode: 0o600 });
-  await fsp.truncate(logPath, 0);
+  await fsp.writeFile(logPath, tail, { mode: 0o600 });
 }
 
 function readEnvironmentFile(file) {
@@ -634,4 +671,4 @@ function positiveTimeout(value) {
 function assertNotAborted(signal) { if (signal?.aborted) { const error = new Error("Terminal operation cancelled; any shared runtime already started remains running."); error.code = "ABORT_ERR"; throw error; } }
 function runtimeError(message, environment) { const error = new Error(`${message} Runtime log: ${environment.logPath}`); error.logPath = environment.logPath; return error; }
 
-module.exports = { taskRetirementBarrier, resolveEnvironment, createEnvironment, status, start, startForeground, runRuntimeCommand, projectionStore, requireDistribution, environmentValue };
+module.exports = { taskRetirementBarrier, resolveEnvironment, createEnvironment, status, start, startForeground, runRuntimeCommand, projectionStore, requireDistribution, environmentValue, ingestRuntimeLogIntoSqlite };

@@ -285,3 +285,151 @@ test("incremental ledger, chat index, and required artifact caches reuse memory 
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("operatorChatIndex stays cached above 50,000 chat rows without reopening SQLite", async () => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "oct-chat-50k-")));
+  for (const dir of ["ledger", "registry/interface/chat_iface", "state/runs", "state/ee_instances"]) {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+  }
+  await fs.writeFile(path.join(root, "registry/interface/chat_iface/interface.json"), JSON.stringify({ id: "chat_iface", interface_type: "world", role: "client" }));
+
+  const totalRows = 51_000;
+  const ledgerPath = path.join(root, "ledger/movements.jsonl");
+  const indexPath = path.join(root, "ledger/ledger-index.sqlite");
+  const sampleLine = `${JSON.stringify({
+    seq: 0, lamport: 1, recorded_at_unix_ms: 1000, trace: "t",
+    kind: "InterfaceArrival", from: { Interface: "chat_iface" }, to: { Interface: "worker-1" },
+    artifact: { id: `operator.message:${"aa".repeat(32)}`, content: Array(32).fill(0xaa) },
+    invocation_metadata: { runtime: { run: "run-other", ee: "ee-1", worker: "worker-1", checkpoint: "cp-1", interface: "chat_iface", epoch: 1 } },
+  })}\n`;
+  const durableEndOffset = Buffer.byteLength(sampleLine, "utf8");
+  await fs.writeFile(ledgerPath, sampleLine, "utf8");
+
+  const db = new DatabaseSync(indexPath);
+  db.exec(`
+    CREATE TABLE index_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE movements(
+      seq INTEGER PRIMARY KEY, lamport INTEGER NOT NULL, recorded_at_unix_ms INTEGER NOT NULL,
+      trace TEXT NOT NULL, kind TEXT NOT NULL, mark TEXT,
+      from_kind TEXT NOT NULL, from_id TEXT NOT NULL, to_kind TEXT NOT NULL, to_id TEXT NOT NULL,
+      artifact_id TEXT, artifact_label TEXT, artifact_content TEXT,
+      runtime_run TEXT, runtime_checkpoint TEXT, runtime_interface TEXT,
+      start_offset INTEGER, end_offset INTEGER
+    );
+    CREATE INDEX idx_mv_kind ON movements(kind, seq);
+    CREATE INDEX idx_mv_runtime_run ON movements(runtime_run, seq) WHERE runtime_run IS NOT NULL;
+  `);
+  db.exec("BEGIN");
+  const insert = db.prepare(`
+    INSERT INTO movements(
+      seq, lamport, recorded_at_unix_ms, trace, kind, mark,
+      from_kind, from_id, to_kind, to_id,
+      artifact_id, artifact_label, artifact_content,
+      runtime_run, runtime_checkpoint, runtime_interface,
+      start_offset, end_offset
+    ) VALUES (?, ?, ?, 't', ?, NULL, 'interface', 'chat_iface', 'interface', 'worker-1', ?, 'operator.message', ?, ?, 'cp-1', 'chat_iface', 0, ?)
+  `);
+  const hex = "aa".repeat(32);
+  for (let seq = 0; seq < totalRows; seq += 1) {
+    const kind = seq % 2 === 0 ? "InterfaceArrival" : "InterfaceOutbound";
+    const runId = seq >= totalRows - 20 ? "run-active" : "run-other";
+    insert.run(seq, seq + 1, 1000 + seq, kind, `operator.message:${hex}`, hex, runId, durableEndOffset);
+  }
+  const meta = db.prepare("INSERT INTO index_meta(key, value) VALUES (?, ?)");
+  meta.run("schema_version", "4");
+  meta.run("watermark", String(totalRows));
+  meta.run("durable_end_offset", String(durableEndOffset));
+  db.exec("COMMIT");
+  db.close();
+
+  const store = createProjectionContext({
+    resolveRepoRoot: () => root,
+    octopusHome: () => root,
+    sourceRegistry: () => path.join(root, "registry"),
+    projectEePolicies: async () => ({ environments: [], issues: [] }),
+  });
+
+  try {
+    const first = await store.readIndexedOperatorChatLedgerRows({ durableRoot: path.join(root, "ledger") }, new Set(["run-active"]));
+    assert.equal(first.rowsByRun.get("run-active").length, 20);
+    assert.equal(first.nextMovementSeq, totalRows - 1);
+
+    // Delete SQLite index — repeated polls & deltas MUST hit the in-memory bounded cache without reopening SQLite.
+    await fs.rm(indexPath);
+
+    const second = await store.readIndexedOperatorChatLedgerRows({ durableRoot: path.join(root, "ledger") }, new Set(["run-active"]));
+    assert.equal(second.rowsByRun.get("run-active").length, 20);
+
+    const delta = await store.readIndexedOperatorChatLedgerDelta({ durableRoot: path.join(root, "ledger") }, new Set(["run-active"]), totalRows - 5);
+    assert.equal(delta.rowsByRun.get("run-active").length, 4);
+    assert.equal(delta.nextMovementSeq, totalRows - 1);
+  } finally {
+    store.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("sqliteClientStore and sqliteLogStore consolidate loose caches and enforce strict <= maxBytes log cap", async () => {
+  const { closeClientStore, openClientStore } = require("../electron/sqliteClientStore.cjs");
+  const { closeAllSqliteLogStores, openSqliteLogStore } = require("../electron/sqliteLogStore.cjs");
+  const { getSettledFileSha256, setSettledFileSha256, setSettledHashStoreHome } = require("../electron/settledFileHashCache.cjs");
+
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "oct-sqlite-stores-")));
+  try {
+    const clientStore = openClientStore(root);
+    clientStore.setChatPreview("run-1", { basis: "fp-1", files: [], text: "hello" });
+    assert.deepEqual(clientStore.getChatPreview("run-1"), { basis: "fp-1", files: [], text: "hello" });
+    clientStore.setChatTurn("run-1:turn-1", { basis: "fp-1", count: 2, rowsDigest: "abc", files: [], state: { text: "turn body" } });
+    assert.deepEqual(clientStore.getChatTurn("run-1:turn-1").state, { text: "turn body" });
+
+    const sampleFile = path.join(root, "settled.bin");
+    const content = Buffer.from("immutable-asset-content");
+    await fs.writeFile(sampleFile, content);
+    const oldTime = new Date(Date.now() - 10_000);
+    await fs.utimes(sampleFile, oldTime, oldTime);
+    const sampleStat = await fs.stat(sampleFile);
+    const expectedHash = "ab".repeat(32);
+
+    setSettledHashStoreHome(root);
+    setSettledFileSha256(sampleFile, sampleStat, { sha256: expectedHash, size: content.length });
+    const hit1 = getSettledFileSha256(sampleFile, sampleStat);
+    assert.deepEqual(hit1, { sha256: expectedHash, size: content.length });
+    // Verify hardlink / alternate path to same inode gets instant persistent SQLite hit.
+    if (process.platform !== "win32") {
+      const linkedPath = path.join(root, "linked.bin");
+      await fs.link(sampleFile, linkedPath);
+      const linkedStat = await fs.stat(linkedPath);
+      assert.deepEqual(getSettledFileSha256(linkedPath, linkedStat), { sha256: expectedHash, size: content.length });
+    } else {
+      assert.deepEqual(
+        getSettledFileSha256(path.join(root, "alias-same-inode.bin"), sampleStat),
+        { sha256: expectedHash, size: content.length },
+      );
+    }
+
+    // Ensure zero loose cache files under client/projection-cache.
+    await assert.rejects(() => fs.stat(path.join(root, "client/projection-cache")));
+
+    // Strict bounded SQLite log store test (256 KiB cap, write > 1 MiB of messages).
+    const capBytes = 256 * 1024;
+    const logStore = openSqliteLogStore(root, { maxBytes: capBytes });
+    const payload = "x".repeat(4096);
+    for (let batch = 0; batch < 16; batch += 1) {
+      const lines = [];
+      for (let i = 0; i < 20; i += 1) {
+        lines.push(`batch-${batch}-msg-${i}:${payload}`);
+      }
+      logStore.appendLines("runtime", "info", lines.join("\n"));
+    }
+    const usage = logStore.diskUsageBytes();
+    assert.ok(usage <= capBytes, `expected log DB usage (${usage}) <= capBytes (${capBytes})`);
+    const recent = logStore.readTail(5);
+    assert.equal(recent.length, 5);
+    assert.ok(recent[recent.length - 1].message.startsWith("batch-15-"), "newest log entries must be retained after pruning");
+  } finally {
+    setSettledHashStoreHome("");
+    closeClientStore(root);
+    closeAllSqliteLogStores();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

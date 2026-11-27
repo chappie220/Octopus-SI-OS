@@ -10,7 +10,8 @@ const { operatorChatEventIdentity } = require("./operatorChatEvents.cjs");
 const { isOperatorChatProviderFailureRow, preserveProjectionEvidenceError } = require("./registryRows.cjs");
 const { arrayValue, ledgerArtifactLabel, numberValue, objectOrEmpty, stringValue } = require("./values.cjs");
 
-const CHAT_LEDGER_KIND_SCAN_BOUND = 50_000;
+const MAX_CACHED_CHAT_RUNS = 128;
+const MAX_CACHED_CHAT_ROWS_PER_RUN = 4_096;
 
 function operatorChatIndexProjection(store) {
   let chatLedgerState = null;
@@ -164,14 +165,90 @@ function operatorChatIndexProjection(store) {
     ]));
   }
 
-  function appendChatRow(rowsByRun, runId, row) {
+  function appendBoundedChatRow(map, runId, row, maxRuns) {
     if (!runId) return;
-    let list = rowsByRun.get(runId);
+    let list = map.get(runId);
     if (!list) {
       list = [];
-      rowsByRun.set(runId, list);
+      map.set(runId, list);
+      if (maxRuns > 0 && map.size > maxRuns) {
+        const oldest = map.keys().next().value;
+        if (oldest !== undefined && oldest !== runId) map.delete(oldest);
+      }
+    } else {
+      map.delete(runId);
+      map.set(runId, list);
     }
     list.push(row);
+    if (list.length > MAX_CACHED_CHAT_ROWS_PER_RUN) {
+      list.splice(0, list.length - MAX_CACHED_CHAT_ROWS_PER_RUN);
+    }
+  }
+
+  function recordTailChatRow(state, row) {
+    const runId = movementRunId(row);
+    if (!runId) return;
+    if (state.hydratedRuns.has(runId)) {
+      appendBoundedChatRow(state.rowsByRun, runId, row, 0);
+    } else {
+      appendBoundedChatRow(state.unhydratedTailByRun, runId, row, MAX_CACHED_CHAT_RUNS);
+    }
+  }
+
+  function evictOldestHydratedRuns(state, protectedRunIds) {
+    while (state.rowsByRun.size > MAX_CACHED_CHAT_RUNS) {
+      let evicted = false;
+      for (const candidate of state.rowsByRun.keys()) {
+        if (protectedRunIds && protectedRunIds.has(candidate)) continue;
+        state.rowsByRun.delete(candidate);
+        state.hydratedRuns.delete(candidate);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
+    }
+  }
+
+  async function hydrateChatRunsFromIndex(index, state, missingRunIds, protectedRunIds) {
+    if (missingRunIds.length === 0) return;
+    const statement = index.database.prepare(
+      `SELECT
+        seq, lamport, recorded_at_unix_ms, trace, kind,
+        from_kind, from_id, to_kind, to_id,
+        artifact_id, artifact_content,
+        runtime_run, runtime_checkpoint, runtime_interface
+      FROM movements
+      WHERE runtime_run = ?
+        AND seq < ?
+        AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
+      ORDER BY seq DESC
+      LIMIT ?`,
+    );
+    const queryWatermark = Math.min(index.watermark, state.nextSeq);
+    for (const runId of missingRunIds) {
+      const descRows = statement.all(runId, queryWatermark, MAX_CACHED_CHAT_ROWS_PER_RUN);
+      const rows = [];
+      for (let i = descRows.length - 1; i >= 0; i--) {
+        const row = descRows[i];
+        if (indexedMovementRunId(row) !== runId) continue;
+        rows.push(normalizeIndexedProjectionMovement(row, index.ledgerPath));
+      }
+      const tailRows = state.unhydratedTailByRun.get(runId);
+      if (tailRows && tailRows.length > 0) {
+        for (const tailRow of tailRows) {
+          if (numberValue(tailRow.seq, -1) >= queryWatermark) rows.push(tailRow);
+        }
+        state.unhydratedTailByRun.delete(runId);
+      }
+      if (rows.length > MAX_CACHED_CHAT_ROWS_PER_RUN) {
+        rows.splice(0, rows.length - MAX_CACHED_CHAT_ROWS_PER_RUN);
+      }
+      state.rowsByRun.delete(runId);
+      state.rowsByRun.set(runId, rows);
+      state.hydratedRuns.add(runId);
+      await yieldToClient();
+    }
+    evictOldestHydratedRuns(state, protectedRunIds);
   }
 
   async function streamChatLedgerTail(ledgerPath, startOffset, expectedSeq, onRow) {
@@ -218,13 +295,13 @@ function operatorChatIndexProjection(store) {
     };
   }
 
-  function ensureChatLedgerState(projection) {
-    const read = chatLedgerTail.then(() => ensureChatLedgerStateUnlocked(projection));
+  function ensureChatLedgerState(projection, requestedRunIds) {
+    const read = chatLedgerTail.then(() => ensureChatLedgerStateUnlocked(projection, requestedRunIds));
     chatLedgerTail = read.then(() => undefined, () => undefined);
     return read;
   }
 
-  async function ensureChatLedgerStateUnlocked(projection) {
+  async function ensureChatLedgerStateUnlocked(projection, requestedRunIds) {
     const durableRoot = projection.durableRoot;
     const ledgerPath = path.join(durableRoot, "movements.jsonl");
     let stat;
@@ -246,72 +323,81 @@ function operatorChatIndexProjection(store) {
       && current.ino === stat.ino
       && stat.size >= current.durableOffset
     ) {
-      if (stat.size === current.durableOffset) return current;
-      const tail = await streamChatLedgerTail(
-        ledgerPath,
-        current.durableOffset,
-        current.nextSeq,
-        (row) => appendChatRow(current.rowsByRun, movementRunId(row), row),
-      );
-      if (tail !== null) {
-        current.durableOffset = tail.consumedOffset;
-        current.nextSeq = tail.nextSeq;
-        current.nextMovementSeq = tail.nextMovementSeq;
-        return current;
+      let advanced = true;
+      if (stat.size > current.durableOffset) {
+        const tail = await streamChatLedgerTail(
+          ledgerPath,
+          current.durableOffset,
+          current.nextSeq,
+          (row) => recordTailChatRow(current, row),
+        );
+        if (tail !== null) {
+          current.durableOffset = tail.consumedOffset;
+          current.nextSeq = tail.nextSeq;
+          current.nextMovementSeq = tail.nextMovementSeq;
+        } else {
+          advanced = false;
+        }
+      }
+      if (advanced) {
+        const missing = [];
+        for (const runId of requestedRunIds) {
+          if (current.hydratedRuns.has(runId)) {
+            const cached = current.rowsByRun.get(runId);
+            if (cached) {
+              current.rowsByRun.delete(runId);
+              current.rowsByRun.set(runId, cached);
+            }
+          } else {
+            missing.push(runId);
+          }
+        }
+        if (missing.length === 0) return current;
+        const index = await openValidatedLedgerIndex(projection);
+        if (index) {
+          try {
+            await hydrateChatRunsFromIndex(index, current, missing, requestedRunIds);
+            return current;
+          } catch (error) {
+            preserveProjectionEvidenceError(error);
+            return null;
+          } finally {
+            index.database.close();
+          }
+        }
+        return null;
       }
     }
 
     const index = await openValidatedLedgerIndex(projection);
     if (!index) return null;
     try {
-      const probeKindBound = index.database.prepare(
-        "SELECT 1 FROM movements WHERE kind = ? AND seq < ? LIMIT 1 OFFSET ?",
-      );
-      const useKindIndex = !probeKindBound.get("InterfaceArrival", index.watermark, CHAT_LEDGER_KIND_SCAN_BOUND)
-        && !probeKindBound.get("InterfaceOutbound", index.watermark, CHAT_LEDGER_KIND_SCAN_BOUND);
-      if (!useKindIndex) {
-        chatLedgerState = null;
-        return { overflow: true };
-      }
-      const rowsByRun = new Map();
-      const statement = index.database.prepare(
-        `SELECT
-          seq, lamport, recorded_at_unix_ms, trace, kind,
-          from_kind, from_id, to_kind, to_id,
-          artifact_id, artifact_content,
-          runtime_run, runtime_checkpoint, runtime_interface
-        FROM movements
-        WHERE kind IN ('InterfaceArrival', 'InterfaceOutbound')
-          AND seq < ?
-        ORDER BY seq ASC`,
-      );
-      let count = 0;
-      for (const row of statement.iterate(index.watermark)) {
-        const runId = indexedMovementRunId(row);
-        if (runId) {
-          appendChatRow(rowsByRun, runId, normalizeIndexedProjectionMovement(row, index.ledgerPath));
-        }
-        if (++count % 256 === 0) await yieldToClient();
-      }
-      await yieldToClient();
-
+      const nextState = {
+        durableRoot,
+        ledgerPath: index.ledgerPath,
+        dev: stat.dev,
+        ino: stat.ino,
+        indexWatermark: index.watermark,
+        durableOffset: index.durableEndOffset,
+        nextSeq: index.watermark,
+        nextMovementSeq: index.watermark - 1,
+        rowsByRun: new Map(),
+        hydratedRuns: new Set(),
+        unhydratedTailByRun: new Map(),
+      };
+      await hydrateChatRunsFromIndex(index, nextState, [...requestedRunIds], requestedRunIds);
       const tail = await streamChatLedgerTail(
         index.ledgerPath,
         index.durableEndOffset,
         index.watermark,
-        (row) => appendChatRow(rowsByRun, movementRunId(row), row),
+        (row) => recordTailChatRow(nextState, row),
       );
       if (tail === null) return null;
-      const nextState = {
-        durableRoot,
-        ledgerPath: index.ledgerPath,
-        dev: tail.stat.dev,
-        ino: tail.stat.ino,
-        durableOffset: tail.consumedOffset,
-        nextSeq: tail.nextSeq,
-        nextMovementSeq: tail.nextMovementSeq,
-        rowsByRun,
-      };
+      nextState.dev = tail.stat.dev;
+      nextState.ino = tail.stat.ino;
+      nextState.durableOffset = tail.consumedOffset;
+      nextState.nextSeq = tail.nextSeq;
+      nextState.nextMovementSeq = tail.nextMovementSeq;
       chatLedgerState = nextState;
       return nextState;
     } catch (error) {
@@ -324,66 +410,16 @@ function operatorChatIndexProjection(store) {
 
   async function readIndexedOperatorChatLedgerRows(projection, runIds) {
     if (runIds.size === 0) return { rowsByRun: new Map(), nextMovementSeq: -1 };
-    const state = await ensureChatLedgerState(projection);
-    if (state && !state.overflow) {
-      const rowsByRun = new Map([...runIds].map((runId) => [
-        runId,
-        [...(state.rowsByRun.get(runId) ?? [])],
-      ]));
-      return {
-        rowsByRun,
-        nextMovementSeq: state.nextMovementSeq,
-      };
-    }
+    const state = await ensureChatLedgerState(projection, runIds);
     if (!state) return null;
-    // Bounded per-run SQLite fallback when chat rows exceed CHAT_LEDGER_KIND_SCAN_BOUND.
-    const index = await openValidatedLedgerIndex(projection);
-    if (!index) return null;
-    try {
-      const rowsByRun = new Map([...runIds].map((runId) => [runId, []]));
-      const statement = index.database.prepare(
-        `SELECT
-          seq, lamport, recorded_at_unix_ms, trace, kind,
-          from_kind, from_id, to_kind, to_id,
-          artifact_id, artifact_content,
-          runtime_run, runtime_checkpoint, runtime_interface
-        FROM movements
-        WHERE runtime_run = ?
-          AND seq < ?
-          AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
-        ORDER BY seq ASC`,
-      );
-      for (const requestedRunId of runIds) {
-        let count = 0;
-        for (const row of statement.iterate(requestedRunId, index.watermark)) {
-          const projected = normalizeIndexedProjectionMovement(row, index.ledgerPath);
-          const runId = indexedMovementRunId(row);
-          if (!runIds.has(runId)) continue;
-          rowsByRun.get(runId).push(projected);
-          if (++count % 256 === 0) await yieldToClient();
-        }
-        await yieldToClient();
-      }
-      const tail = await readIndexedLedgerTail(
-        index.ledgerPath,
-        index.durableEndOffset,
-        index.watermark,
-        runIds,
-      );
-      if (tail === null) return null;
-      for (const [runId, rows] of tail.rowsByRun) {
-        rowsByRun.get(runId).push(...rows);
-      }
-      return {
-        rowsByRun,
-        nextMovementSeq: tail.nextMovementSeq,
-      };
-    } catch (error) {
-      preserveProjectionEvidenceError(error);
-      return null;
-    } finally {
-      index.database.close();
-    }
+    const rowsByRun = new Map([...runIds].map((runId) => [
+      runId,
+      [...(state.rowsByRun.get(runId) ?? [])],
+    ]));
+    return {
+      rowsByRun,
+      nextMovementSeq: state.nextMovementSeq,
+    };
   }
 
   async function readIndexedLedgerTail(ledgerPath, startOffset, expectedSeq, runIds) {
@@ -421,66 +457,21 @@ function operatorChatIndexProjection(store) {
   }
 
   async function readIndexedOperatorChatLedgerDelta(projection, runIds, afterSeq) {
-    const state = await ensureChatLedgerState(projection);
-    if (state && !state.overflow) {
-      const rowsByRun = new Map();
-      for (const runId of runIds) {
-        const rows = state.rowsByRun.get(runId);
-        if (!rows || rows.length === 0 || numberValue(rows[rows.length - 1].seq, -1) <= afterSeq) {
-          rowsByRun.set(runId, []);
-        } else {
-          rowsByRun.set(runId, rows.filter((row) => numberValue(row.seq, -1) > afterSeq));
-        }
-      }
-      return {
-        rowsByRun,
-        nextMovementSeq: Math.max(afterSeq, state.nextMovementSeq),
-      };
-    }
+    const state = await ensureChatLedgerState(projection, runIds);
     if (!state) return null;
-    const index = await openValidatedLedgerIndex(projection);
-    if (!index) return null;
-    try {
-      const rowsByRun = new Map([...runIds].map((runId) => [runId, []]));
-      const rows = index.database.prepare(
-        `SELECT
-          seq, lamport, recorded_at_unix_ms, trace, kind,
-          from_kind, from_id, to_kind, to_id,
-          artifact_id, artifact_content,
-          runtime_run, runtime_checkpoint, runtime_interface
-        FROM movements
-        WHERE seq > ?
-          AND seq < ?
-          AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
-        ORDER BY seq ASC`,
-      ).iterate(afterSeq, index.watermark);
-      let count = 0;
-      for (const row of rows) {
-        if (++count % 256 === 0) await yieldToClient();
-        const runId = indexedMovementRunId(row);
-        if (!runIds.has(runId)) continue;
-        rowsByRun.get(runId).push(normalizeIndexedProjectionMovement(row, index.ledgerPath));
+    const rowsByRun = new Map();
+    for (const runId of runIds) {
+      const rows = state.rowsByRun.get(runId);
+      if (!rows || rows.length === 0 || numberValue(rows[rows.length - 1].seq, -1) <= afterSeq) {
+        rowsByRun.set(runId, []);
+      } else {
+        rowsByRun.set(runId, rows.filter((row) => numberValue(row.seq, -1) > afterSeq));
       }
-      const tail = await readIndexedLedgerTail(
-        index.ledgerPath,
-        index.durableEndOffset,
-        index.watermark,
-        runIds,
-      );
-      if (tail === null) return null;
-      for (const [runId, tailRows] of tail.rowsByRun) {
-        rowsByRun.get(runId).push(...tailRows.filter((row) => numberValue(row.seq, -1) > afterSeq));
-      }
-      return {
-        rowsByRun,
-        nextMovementSeq: Math.max(afterSeq, tail.nextMovementSeq),
-      };
-    } catch (error) {
-      preserveProjectionEvidenceError(error);
-      return null;
-    } finally {
-      index.database.close();
     }
+    return {
+      rowsByRun,
+      nextMovementSeq: Math.max(afterSeq, state.nextMovementSeq),
+    };
   }
 
   return { buildOperatorChatRunIndex, closeOperatorChatIndexProjection, operatorChatIncrementalEventKey, operatorChatLedgerDelta, operatorChatLedgerRows, operatorChatRunIndex, readIndexedLedgerTail, readIndexedOperatorChatLedgerDelta, readIndexedOperatorChatLedgerRows };

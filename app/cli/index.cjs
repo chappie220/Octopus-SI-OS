@@ -161,6 +161,10 @@ async function main(argv = process.argv.slice(2), io = process) {
     if (command === "serve") {
       if (words.length) throw new Error("serve does not accept positional arguments. See --help.");
       const { createAgentServer } = require("../electron/agentServer.cjs");
+      const { openSqliteLogStore } = require("../electron/sqliteLogStore.cjs");
+      const { ingestRuntimeLogIntoSqlite } = require("./environment.cjs");
+      let logStore = null;
+      try { logStore = openSqliteLogStore(environment.home); } catch {}
       const server = await createAgentServer({
         environment,
         port: flags.port === undefined ? undefined : Number(flags.port),
@@ -174,22 +178,35 @@ async function main(argv = process.argv.slice(2), io = process) {
       const onSignal = () => stop.abort();
       process.once("SIGINT", onSignal);
       process.once("SIGTERM", onSignal);
+      const logDrainTimer = setInterval(() => {
+        void ingestRuntimeLogIntoSqlite(environment.home, environment.logPath).catch(() => {});
+      }, 30_000);
+      logDrainTimer.unref?.();
       try {
         environment.requireDistribution();
         await server.listen();
+        logStore?.append("serve", "info", `Agent server listening at ${server.origin} (home=${environment.home})`);
         await environment.start({
           signal: stop.signal,
           timeoutMs: parsed.timeoutMs || undefined,
-          onProgress: (value) => progress(io, json, value.phase.replaceAll("_", " ")),
+          onProgress: (value) => {
+            logStore?.append("serve", "info", `runtime phase: ${value.phase}`);
+            progress(io, json, value.phase.replaceAll("_", " "));
+          },
         });
+        await ingestRuntimeLogIntoSqlite(environment.home, environment.logPath).catch(() => {});
         report({ url: server.origin, home: environment.home });
         if (!stop.signal.aborted) await new Promise((resolve) => stop.signal.addEventListener("abort", resolve, { once: true }));
       } catch (error) {
+        logStore?.append("serve", "error", `serve error: ${error?.stack || error?.message || error}`);
         if (!stop.signal.aborted) throw error;
       } finally {
+        clearInterval(logDrainTimer);
         process.off("SIGINT", onSignal);
         process.off("SIGTERM", onSignal);
         await server.close();
+        await ingestRuntimeLogIntoSqlite(environment.home, environment.logPath).catch(() => {});
+        logStore?.close();
       }
       return 0;
     }

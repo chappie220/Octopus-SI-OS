@@ -1,4 +1,6 @@
 const path = require("node:path");
+const { closeClientStore } = require("./sqliteClientStore.cjs");
+const { setSettledHashStoreHome } = require("./settledFileHashCache.cjs");
 const { DESCRIPTOR_REGISTRIES } = require("./projection/constants.cjs");
 const { nativeTurnRecordedInputs } = require("./projection/operatorChatEvents.cjs");
 const { mutateApplicationPrivateConfiguration, readApplicationLogoAsset } = require("./projection/privateConfiguration.cjs");
@@ -72,6 +74,7 @@ function createProjectionContext(options) {
   for (const projection of [invalidationProjection, queryRouterProjection, movementPagesProjection, clientSurfacesProjection, interfaceArtifactsProjection, runActivityProjection, configurationProjection, workerEnvironmentsProjection, descriptorRowsProjection, ledgerProjection, indexedLedgerProjection, operatorChatIndexProjection, operatorOsProjection, operatorChatContextProjection, operatorChatTurnsProjection, operatorChatListProjection, operatorChatMessagesProjection, scheduledInterfacesProjection, topologyRowsProjection]) {
     Object.assign(store, projection(store));
   }
+  setSettledHashStoreHome(octopusHome());
   store.close = () => {
     store.closeProjectionWatchers();
     store.closeConfigurationProjection();
@@ -80,6 +83,7 @@ function createProjectionContext(options) {
     store.closeOperatorChatIndexProjection?.();
     store.operatorChatPreviewCache.clear();
     store.operatorChatTurnMemoryCache.clear();
+    closeClientStore(octopusHome());
   };
   return store;
 }

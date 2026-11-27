@@ -26,6 +26,8 @@ function interfaceArtifactsProjection(store) {
       interfaceId,
       labels,
       afterSeq,
+      false,
+      { limit: params.limit, newest },
     );
     if (indexed === null) await store.refreshLedgerProjection(projection);
     const seen = new Set();
@@ -176,6 +178,7 @@ function interfaceArtifactsProjection(store) {
     labels,
     afterSeq,
     outboundRecipientOnly = false,
+    options = {},
   ) {
     const index = await openValidatedLedgerIndex(projection);
     if (!index) return null;
@@ -207,6 +210,10 @@ function interfaceArtifactsProjection(store) {
         )`);
         values.push(interfaceId, interfaceId, interfaceId);
       }
+      const newest = options.newest === true;
+      const requestedLimit = options.limit !== undefined ? numberValue(options.limit, 2_000) : 2_500;
+      const sqlLimit = Math.min(10_000, Math.max(256, requestedLimit * 4));
+      values.push(sqlLimit);
       const indexedRows = index.database.prepare(
         `SELECT
            seq, lamport, recorded_at_unix_ms, trace, kind, mark,
@@ -215,7 +222,8 @@ function interfaceArtifactsProjection(store) {
            runtime_run, runtime_checkpoint, runtime_interface
          FROM movements
          WHERE ${predicates.join("\nAND ")}
-         ORDER BY seq ASC`,
+         ORDER BY seq ${newest ? "DESC" : "ASC"}
+         LIMIT ?`,
       ).all(...values).map((row) => normalizeIndexedProjectionMovement(row, index.ledgerPath));
       const tail = await readInterfaceArtifactLedgerTail(
         index.ledgerPath,
@@ -434,8 +442,9 @@ function interfaceArtifactsProjection(store) {
              runtime_run, runtime_checkpoint, runtime_interface
            FROM movements
            WHERE runtime_run = ? AND kind = 'InterfaceOutbound' AND artifact_id LIKE '%.result:%'
-           ORDER BY seq ASC`,
-        ).all(runId).map((row) => normalizeIndexedProjectionMovement(row, index.ledgerPath));
+           ORDER BY seq DESC
+           LIMIT 2000`,
+        ).all(runId).reverse().map((row) => normalizeIndexedProjectionMovement(row, index.ledgerPath));
       } finally {
         index.database.close();
       }
