@@ -8,6 +8,7 @@ on:
       - "app/scripts/test-cli-target.cjs"
       - "crates/octopus-file-storage/src/publication/directory.rs"
       - "crates/octopus-verifiers/src/process_authority/linux.rs"
+      - "registry/worker_environment_kind/code_mode/packages/octopus-code-mode-engine/**"
       - "registry/worker_environment_kind/process_session/packages/octopus-linux-process-authority/**"
       - "registry/worker_environment_kind/process_session/packages/octopus-util-pty/**"
       - "registry/interface/world_provider_codex/packages/octopus-shell-command/**"

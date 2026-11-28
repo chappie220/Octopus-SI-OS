@@ -36,6 +36,9 @@ apk add build-base pkgconf openssl-dev sqlite-dev alsa-lib-dev libgcc libstdc++ 
 Because Alpine links system libraries (`openssl`, `sqlite`, `alsa-lib`) dynamically
 against musl, set `RUSTFLAGS="-C target-feature=-crt-static"` when building Rust
 binaries on Alpine (`aarch64-unknown-linux-musl` or `x86_64-unknown-linux-musl`).
+Because upstream `rusty_v8` does not publish prebuilt musl archives, the V8-backed
+`code_mode` engine fails closed on musl builds while all other runtime binaries,
+process isolation, shells, and rooms build and run natively.
 
 ALSA headers are needed by the audio capability built with the workspace and
 CLI distribution, even when the runtime is used headlessly. These build

@@ -18,9 +18,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-
-deno_core_icudata = "0.77.0"
 tracing = "0.1.44"
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+deno_core_icudata = "0.77.0"
 v8 = "=149.2.0"
 
 [dev-dependencies]

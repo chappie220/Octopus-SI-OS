@@ -1,5 +1,9 @@
 mod cell_actor;
 mod protocol;
+#[cfg(not(target_env = "musl"))]
+mod runtime;
+#[cfg(target_env = "musl")]
+#[path = "runtime/unavailable.rs"]
 mod runtime;
 mod service;
 mod tool_name;
